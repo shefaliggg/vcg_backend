@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const { getStructTreeRoot } = require('pdfkit');
+
 const UserSchema = new mongoose.Schema(
   {
     firstName: { type: String, trim: true, required: true },
@@ -13,8 +15,11 @@ const UserSchema = new mongoose.Schema(
       billingAddress: { type: String },
       email: { type: String },
       phone: { type: String },
-      taxId: { type: String }
+      taxId: { type: String },
+      gstNumber: { type: String },
     },
+    resetPasswordOtp: { type: String },
+    resetPasswordOtpExpires: { type: Date },
     adminProfile: {
       dispatcherName: { type: String },
       dispatcherEmail: { type: String },
@@ -22,7 +27,8 @@ const UserSchema = new mongoose.Schema(
       salespersonName: { type: String },
       salespersonEmail: { type: String },
       salespersonPhone: { type: String }
-    }
+    },
+    expoPushToken: { type: String },
   },
   { timestamps: { createdAt: 'createdAt', updatedAt: 'updatedAt' } }
 );

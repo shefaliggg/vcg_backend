@@ -24,4 +24,12 @@ router.put('/profile/company', requireAuth, userController.updateCompanyProfile)
 router.get('/profile/admin', requireAuth, userController.getAdminProfile);
 router.put('/profile/admin', requireAuth, userController.updateAdminProfile);
 
+router.post('/save-push-token', requireAuth, async (req, res) => {
+  await User.findByIdAndUpdate(req.user._id, {
+    pushToken: req.body.pushToken
+  });
+
+  res.json({ success: true });
+});
+
 module.exports = router;

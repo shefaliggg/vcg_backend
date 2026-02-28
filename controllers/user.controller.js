@@ -18,10 +18,11 @@ const getMe = async (req, res) => {
 // Update user profile
 const updateProfile = async (req, res) => {
   try {
-    const { firstName, lastName, phone, companyName, gstNumber } = req.body;
+    const { firstName, lastName, phone, companyProfile } = req.body;
+
     const userId = req.params.userId || req.user._id;
 
-    // Check if user can update this profile
+    // Authorization check
     if (req.user.role !== 'admin' && userId !== req.user._id.toString()) {
       return res.status(403).json({ message: 'Not authorized to update this profile' });
     }
@@ -31,24 +32,36 @@ const updateProfile = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Update fields
+    // Update basic fields
     if (firstName) user.firstName = firstName;
     if (lastName) user.lastName = lastName;
     if (phone) user.phone = phone;
-    if (companyName !== undefined) user.companyName = companyName;
-    if (gstNumber !== undefined) user.gstNumber = gstNumber;
+
+    // 🔥 Correct nested update
+    if (companyProfile) {
+      if (!user.companyProfile) {
+        user.companyProfile = {};
+      }
+
+      if (companyProfile.companyName !== undefined)
+        user.companyProfile.companyName = companyProfile.companyName;
+
+      if (companyProfile.gstNumber !== undefined)
+        user.companyProfile.gstNumber = companyProfile.gstNumber;
+    }
 
     await user.save();
 
     const updatedUser = await User.findById(userId).select('-passwordHash');
-    return res.json({ 
-      success: true, 
+
+    return res.json({
       message: 'Profile updated successfully',
-      data: updatedUser 
+      user: updatedUser,
     });
-  } catch (err) {
-    console.error('[USER] Error updating profile:', err);
-    return res.status(500).json({ message: 'Server error' });
+
+  } catch (error) {
+    console.error("Update profile error:", error);
+    res.status(500).json({ message: 'Update failed' });
   }
 };
 

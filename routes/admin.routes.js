@@ -8,10 +8,15 @@ const {
   getRejectedDrivers, 
   approveDriver, 
   rejectDriver,
-  assignDriverToBooking
+  assignDriverToBooking,
+  getAllShippers,
+  getDashboardStats
 } = require('../controllers/admin.controller');
-const { getAllBookings } = require('../controllers/booking.controller');
 
+// Get all users with role=user (shippers)
+router.get('/users', requireAuth, requireRole('admin'), getAllShippers);
+const { getAllBookings } = require('../controllers/booking.controller');
+router.get('/dashboard',getDashboardStats)
 router.get('/drivers/pending', requireAuth, requireRole('admin'), getPendingDrivers);
 router.get('/drivers/approved', requireAuth, requireRole('admin'), getApprovedDrivers);
 router.get('/drivers/rejected', requireAuth, requireRole('admin'), getRejectedDrivers);

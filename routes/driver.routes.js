@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { requireAuth } = require('../middlewares/auth.middleware');
 const { requireRole } = require('../middlewares/role.middleware');
-const { getDriverProfile, onboarding, updateDriverProfile, updateAvailability } = require('../controllers/driver.controller');
+const { getDriverProfile, onboarding, updateDriverProfile, updateAvailability,updateBankDetails,verifyBank,updateLicenseInfo } = require('../controllers/driver.controller');
 
 const uploadsDir = path.join(__dirname, '..', 'uploads', 'drivers');
 if (!fs.existsSync(uploadsDir)) {
@@ -34,8 +34,21 @@ router.post(
   onboarding
 );
 
-router.put('/:driverId', requireAuth, requireRole('driver'), updateDriverProfile);
-
+router.put('/me', requireAuth, requireRole('driver'), updateDriverProfile);
+router.put('/me/license',requireAuth,requireRole('driver'),updateLicenseInfo)
 router.put('/:driverId/availability', requireAuth, requireRole('driver'), updateAvailability);
+
+router.put(
+  '/me/bank',
+  requireAuth,
+  updateBankDetails
+);
+
+router.put(
+  "/:id/verify-bank",
+  requireAuth,
+  requireRole("admin"),
+  verifyBank
+);
 
 module.exports = router;

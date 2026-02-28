@@ -1,4 +1,5 @@
 const express = require('express');
+const router = express.Router();
 const { requireAuth } = require('../middlewares/auth.middleware');
 const { requireRole } = require('../middlewares/role.middleware');
 const {
@@ -12,9 +13,11 @@ const {
   driverAcceptRateConfirmation,
   getBookingById,
   debugBooking,
-  getDriverConfirmations
+  getDriverConfirmations,
+  getBookingRaw
 } = require('../controllers/booking.controller');
-const router = express.Router();
+// Debug: get raw MongoDB document for a booking
+router.get('/:id/raw', getBookingRaw);
 // GET /api/bookings/for-driver - bookings for the logged-in driver where user has signed
 router.get('/for-driver', requireAuth, getDriverConfirmations);
 

@@ -17,7 +17,7 @@ const onboarding = async (req, res) => {
   try {
     const driver = await Driver.findOne({ userId: req.user._id });
     if (!driver) return res.status(404).json({ message: 'Driver record not found' });
-    
+
     // Store only the relative path from uploads directory
     const licenseImageUrl = req.files?.license?.[0]?.path
       ? `uploads/drivers/${req.files.license[0].filename}`
@@ -67,36 +67,40 @@ const onboarding = async (req, res) => {
   }
 };
 
-const updateDriverProfile = async (req, res) => {
+const updateLicenseInfo = async (req, res) => {
   try {
-    const { driverId } = req.params;
-    const driver = await Driver.findById(driverId);
-    
+    const userId = req.user._id;
+
+    const { licenseNumber, licenseExpiry } = req.body;
+
+    const driver = await Driver.findOne({ userId });
+
     if (!driver) {
-      return res.status(404).json({ message: 'Driver not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Driver profile not found'
+      });
     }
 
-    // Check if user owns this driver profile or is admin
-    if (driver.userId.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Unauthorized' });
-    }
-
-    const { vehicleNumber, vehicleType, vehicleCapacity, licenseNumber, licenseExpiry } = req.body;
-
-    if (vehicleNumber !== undefined) driver.vehicleNumber = vehicleNumber;
-    if (vehicleType !== undefined) driver.vehicleType = vehicleType;
-    if (vehicleCapacity !== undefined) driver.vehicleCapacity = vehicleCapacity;
-    if (licenseNumber !== undefined) driver.licenseNumber = licenseNumber;
-    if (licenseExpiry !== undefined) driver.licenseExpiry = licenseExpiry;
+    driver.licenseNumber = licenseNumber ?? driver.licenseNumber;
+    driver.licenseExpiry = licenseExpiry ?? driver.licenseExpiry;
 
     await driver.save();
 
-    return res.json({ success: true, data: driver });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Server error' });
+    res.status(200).json({
+      success: true,
+      driver
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update license'
+    });
   }
 };
+
 
 const updateAvailability = async (req, res) => {
   try {
@@ -104,7 +108,7 @@ const updateAvailability = async (req, res) => {
     const { isOnline } = req.body;
 
     const driver = await Driver.findById(driverId);
-    
+
     if (!driver) {
       return res.status(404).json({ message: 'Driver not found' });
     }
@@ -124,4 +128,106 @@ const updateAvailability = async (req, res) => {
   }
 };
 
-module.exports = { getDriverProfile, onboarding, updateDriverProfile, updateAvailability };
+const updateBankDetails = async (req, res) => {
+  try {
+    const driver = await Driver.findOne({ userId: req.user._id });
+
+    if (!driver)
+      return res.status(404).json({ message: "Driver not found" });
+
+    driver.bankDetails = {
+      accountHolderName: req.body.accountHolderName,
+      bankName: req.body.bankName,
+      accountNumber: req.body.accountNumber,
+      ifscCode: req.body.ifscCode,
+      isVerified: false
+    };
+
+    await driver.save();
+
+    res.json({ message: "Bank details updated successfully" });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update bank details" });
+  }
+};
+
+const verifyBank = async (req, res) => {
+  try {
+    const driver = await Driver.findById(req.params.id);
+
+    if (!driver) {
+      return res.status(404).json({ message: "Driver not found" });
+    }
+
+    driver.bankDetails.isVerified = true;
+    await driver.save();
+
+    res.json({ success: true, message: "Bank verified successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Verification failed" });
+  }
+};
+
+
+const User = require("../models/User");
+const updateDriverProfile = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    console.log("JWT USER ID:", req.user.id);
+    console.log("Driver in DB:", await Driver.find());
+
+    const {
+      firstName,
+      lastName,
+      phone,
+      vehicleNumber,
+      vehicleType,
+      vehicleCapacity,
+    } = req.body;
+
+    // Update user
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { firstName, lastName, phone },
+      { new: true }
+    );
+
+    // 🔥 Use findOne FIRST
+    let driver = await Driver.findOne({ userId: userId });
+
+    console.log("USER ID:", userId);
+    console.log("Driver found:", driver);
+
+    if (!driver) {
+      return res.status(404).json({
+        success: false,
+        message: "Driver profile not found"
+      });
+    }
+
+    driver.vehicleNumber = vehicleNumber ?? driver.vehicleNumber;
+    driver.vehicleType = vehicleType ?? driver.vehicleType;
+    driver.vehicleCapacity = vehicleCapacity ?? driver.vehicleCapacity;
+
+    await driver.save();
+
+    res.json({
+      success: true,
+      driver,
+      user: updatedUser
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: "Update failed"
+    });
+  }
+};
+
+module.exports = { getDriverProfile, onboarding, updateDriverProfile, updateAvailability, updateBankDetails, verifyBank, updateDriverProfile,updateLicenseInfo };

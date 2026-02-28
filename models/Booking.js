@@ -40,22 +40,42 @@ const BookingSchema = new mongoose.Schema({
     }
   ],
   rateConfirmation: {
-    status: {
-      type: String,
-      enum: ['not_generated', 'generated', 'user_signed', 'driver_accepted'],
-      default: 'not_generated'
-    },
-    pdfUrl: { type: String },
-    generatedAt: { type: Date },
-    userSignedAt: { type: Date },
-    driverAcceptedAt: { type: Date },
-    userSignatureUrl: { type: String },
-    driverSignatureUrl: { type: String }
-  },
   status: {
     type: String,
-    enum: ['OPEN_FOR_QUOTES', 'CONFIRMED', 'IN_PROGRESS', 'DELIVERED'],
+   enum: [
+  'not_generated',
+  'awaiting_user_signature',
+  'user_signed',
+  'driver_accepted'
+],
+    default: 'not_generated'
+  },
+
+  // 🔥 ADD THESE TWO (VERY IMPORTANT)
+  amount: { type: Number },
+  driverId: { type: mongoose.Schema.Types.ObjectId, ref: 'Driver' },
+
+  pdfUrl: { type: String },
+  generatedAt: { type: Date },
+  userSignedAt: { type: Date },
+  driverAcceptedAt: { type: Date },
+  userSignatureUrl: { type: String },
+  driverSignatureUrl: { type: String }
+},
+  status: {
+    type: String,
+    enum: ['OPEN_FOR_QUOTES', 'CONFIRMED', 'IN_PROGRESS', 'DELIVERED', 'ACCEPTED'],
     default: 'OPEN_FOR_QUOTES'
+  },
+  currentLocation: {
+    latitude: Number,
+    longitude: Number,
+    updatedAt: Date,
+  },
+  liveTracking: {
+    isActive: { type: Boolean, default: false },
+    startedAt: Date,
+    endedAt: Date,
   }
 }, { timestamps: true });
 
