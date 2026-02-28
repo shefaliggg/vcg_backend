@@ -523,7 +523,7 @@ const getPendingPODs = async (req, res) => {
       toLocation: trip.bookingId?.deliveryLocation?.address,
       uploadDate: trip.updatedAt,
       status: 'pod_uploaded',
-      images: [`http://172.20.10.6:5000${trip.podUrl}`]
+      images: [`http://54.174.219.57:5000${trip.podUrl}`]
     }));
 
     return res.json(formatted);

@@ -103,8 +103,8 @@ const payInvoice = async (req, res) => {
             quantity: 1,
           },
         ],
-        success_url: "http://192.168.30.28:5000/payment-success",
-        cancel_url: "http://192.168.30.28:5000/payment-cancel",
+        success_url: "http://54.174.219.57:5000/payment-success",
+        cancel_url: "http://54.174.219.57:5000/payment-cancel",
         metadata: {
           invoiceId: invoice._id.toString(),
         },
