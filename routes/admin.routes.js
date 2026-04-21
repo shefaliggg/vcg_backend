@@ -10,7 +10,8 @@ const {
   rejectDriver,
   assignDriverToBooking,
   getAllShippers,
-  getDashboardStats
+  getDashboardStats,
+  getAllTrucks
 } = require('../controllers/admin.controller');
 
 // Get all users with role=user (shippers)
@@ -20,6 +21,7 @@ router.get('/dashboard',getDashboardStats)
 router.get('/drivers/pending', requireAuth, requireRole('admin'), getPendingDrivers);
 router.get('/drivers/approved', requireAuth, requireRole('admin'), getApprovedDrivers);
 router.get('/drivers/rejected', requireAuth, requireRole('admin'), getRejectedDrivers);
+router.get('/trucks', requireAuth, requireRole('admin'), getAllTrucks);
 router.put('/drivers/:id/approve', requireAuth, requireRole('admin'), approveDriver);
 router.put('/drivers/:id/reject', requireAuth, requireRole('admin'), rejectDriver);
 

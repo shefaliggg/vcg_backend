@@ -78,6 +78,7 @@ const getRejectedDrivers = async (req, res) => {
 const Driver = require('../models/Driver');
 const Booking = require('../models/Booking');
 const Trip = require('../models/Trip');
+const Truck = require('../models/Truck');
 
 const getPendingDrivers = async (req, res) => {
   try {
@@ -164,6 +165,22 @@ const getDashboardStats = async (req, res) => {
   }
 };
 
+const getAllTrucks = async (req, res) => {
+  try {
+    const trucks = await Truck.find()
+      .populate({
+        path: 'driverId',
+        populate: { path: 'userId', select: 'firstName lastName phone email' },
+      })
+      .sort({ createdAt: -1 });
+
+    return res.json({ trucks });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 
 module.exports = { 
   getPendingDrivers, 
@@ -173,4 +190,5 @@ module.exports = {
   rejectDriver,
   getAllShippers,
   getDashboardStats,
+  getAllTrucks,
 };

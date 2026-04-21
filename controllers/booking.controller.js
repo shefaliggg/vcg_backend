@@ -151,15 +151,31 @@ const getAvailableBookings = async (req, res) => {
 // POST /api/bookings
 const createBooking = async (req, res) => {
   try {
-    const { shipper, consignee, pickupLocation, deliveryLocation, pickupDate, deliveryDate, truckType, loadDetails } = req.body;
+    const {
+      userId,
+      driverId,
+      truckId,
+      shipper,
+      consignee,
+      pickupLocation,
+      deliveryLocation,
+      pickupDate,
+      deliveryDate,
+      truckType,
+      loadDetails,
+    } = req.body;
+
+    const bookingUserId = req.user?.role === 'admin' ? userId : req.user._id;
 
     // Validate required fields (shipper/consignee optional for testing)
-    if (!pickupLocation || !deliveryLocation || !pickupDate || !truckType || !loadDetails || !loadDetails.weight) {
-      return res.status(400).json({ message: 'Missing required fields: pickupLocation, deliveryLocation, pickupDate, truckType, loadDetails.weight' });
+    if (!bookingUserId || !pickupLocation || !deliveryLocation || !pickupDate || !truckType || !loadDetails || !loadDetails.weight) {
+      return res.status(400).json({ message: 'Missing required fields: userId, pickupLocation, deliveryLocation, pickupDate, truckType, loadDetails.weight' });
     }
 
     const booking = new Booking({
-      userId: req.user._id,
+      userId: bookingUserId,
+      driverId: driverId || undefined,
+      truckId: truckId || undefined,
       shipper: shipper || { name: 'TBD', phone: 'TBD' },
       consignee: consignee || { name: 'TBD', phone: 'TBD' },
       pickupLocation,
