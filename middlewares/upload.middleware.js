@@ -11,6 +11,8 @@ const storage = multer.diskStorage({
       uploadDir = path.join('uploads', 'signatures');
     } else if (req.body.uploadType === 'pod') {
       uploadDir = path.join('uploads', 'pods');
+    } else if (req.body.uploadType === 'truck' || file.fieldname === 'truckImage') {
+      uploadDir = path.join('uploads', 'trucks');
     }
     
     // Ensure directory exists

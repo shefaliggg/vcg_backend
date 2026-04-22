@@ -5,6 +5,35 @@ const { signToken } = require('../config/jwt');
 
 const { Resend } = require("resend");
 const resend = new Resend(process.env.RESEND_API_KEY);
+
+const verifyEmailByToken = async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).send('Invalid verification link.');
+    }
+
+    const user = await User.findOne({
+      emailVerificationToken: token,
+      emailVerificationExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).send('Verification link is invalid or expired.');
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save();
+
+    return res.status(200).send('Email verified successfully. You can now log in to the driver app.');
+  } catch (err) {
+    console.error('[verifyEmailByToken] Error:', err);
+    return res.status(500).send('Server error while verifying email.');
+  }
+};
+
 const register = async (req, res) => {
   try {
     console.log('[REGISTER] Body received:', req.body);
@@ -39,7 +68,7 @@ const register = async (req, res) => {
     }
 
     const token = signToken(user);
-    const safeUser = { id: user._id, firstName, lastName, email, phone, role: user.role, createdAt: user.createdAt };
+    const safeUser = { id: user._id, firstName, lastName, email, phone, role: user.role, createdAt: user.createdAt, emailVerified: user.emailVerified };
     console.log('[REGISTER] Success:', email);
     return res.status(201).json({ success: true, token, user: safeUser });
   } catch (err) {
@@ -204,4 +233,4 @@ const verifyOtpAndResetPassword = async (req, res) => {
   }
 };
 
-module.exports = { register, login, me, adminLogin, forgotPassword, verifyOtpAndResetPassword };
+module.exports = { register, login, me, adminLogin, forgotPassword, verifyOtpAndResetPassword, verifyEmailByToken };

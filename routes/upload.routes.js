@@ -26,4 +26,22 @@ router.post('/pod', requireAuth, upload.single('pod'), (req, res) => {
   }
 });
 
+router.post('/truck-image', requireAuth, upload.single('truckImage'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    const fileUrl = `/uploads/trucks/${req.file.filename}`;
+    return res.json({
+      success: true,
+      message: 'Truck image uploaded successfully',
+      fileUrl,
+    });
+  } catch (err) {
+    console.error('[UPLOAD] Error uploading truck image:', err);
+    return res.status(500).json({ message: 'Failed to upload truck image', error: err.message });
+  }
+});
+
 module.exports = router;

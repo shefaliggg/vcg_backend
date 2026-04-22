@@ -5,6 +5,7 @@ const TruckSchema = new mongoose.Schema({
   registrationNumber: { type: String, required: true, unique: true },
   truckType: { type: String, required: true },
   capacity: { type: Number, required: true },
+  truckImageUrl: { type: String },
   status: { type: String, enum: ['available', 'assigned', 'maintenance'], default: 'available' },
   currentLocation: {
     address: { type: String },

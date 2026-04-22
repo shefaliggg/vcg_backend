@@ -20,13 +20,47 @@ const ratingRoutes = require('./routes/rating.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const app = express();
 
-// Configure CORS to allow image loading
-app.use(cors({
-  origin: '*',
+const defaultAllowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3001',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:8081',
+  'http://127.0.0.1:8081',
+  'http://54.174.219.57:5000',
+  'http://54.174.219.57',
+];
+
+const envAllowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envAllowedOrigins])];
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow requests from non-browser clients (mobile apps, curl, Postman).
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+app.set('corsOptions', corsOptions);
 
 app.post(
   "/stripe-webhook",

@@ -11,10 +11,9 @@ const PORT = process.env.PORT || 5000;
   try {
     await connectDB();
     const server = http.createServer(app);
+    const corsOptions = app.get('corsOptions') || { origin: '*' };
     const io = new Server(server, {
-      cors: {
-        origin: '*',
-      },
+      cors: corsOptions,
     });
     app.set('io',io)
 

@@ -20,6 +20,9 @@ const UserSchema = new mongoose.Schema(
     },
     resetPasswordOtp: { type: String },
     resetPasswordOtpExpires: { type: Date },
+    emailVerified: { type: Boolean, default: false },
+    emailVerificationToken: { type: String },
+    emailVerificationExpires: { type: Date },
     adminProfile: {
       dispatcherName: { type: String },
       dispatcherEmail: { type: String },
