@@ -26,6 +26,26 @@ router.post('/pod', requireAuth, upload.single('pod'), (req, res) => {
   }
 });
 
+// POST /api/upload/booking-document (BOL, rate confirmation, other Post Load docs)
+router.post('/booking-document', requireAuth, upload.single('bookingDocument'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    const fileUrl = `/uploads/booking-docs/${req.file.filename}`;
+    return res.json({
+      success: true,
+      message: 'Document uploaded successfully',
+      fileUrl,
+      fileName: req.file.originalname,
+    });
+  } catch (err) {
+    console.error('[UPLOAD] Error uploading booking document:', err);
+    return res.status(500).json({ message: 'Failed to upload document', error: err.message });
+  }
+});
+
 router.post('/truck-image', requireAuth, upload.single('truckImage'), (req, res) => {
   try {
     if (!req.file) {

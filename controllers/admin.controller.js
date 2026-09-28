@@ -1,10 +1,116 @@
 const User = require('../models/User');
 const Invoice = require('../models/Invoice');
+const Document = require('../models/Document');
+const ShipperDocument = require('../models/ShipperDocument');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { Resend } = require('resend');
+const { sendMail } = require('../utils/mailer');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const attachShipperDocuments = async (users) => {
+  const list = Array.isArray(users) ? users : [users];
+  const documents = await ShipperDocument.find({ userId: { $in: list.map((u) => u._id) } });
+  return list.map((user) => ({
+    ...user.toObject(),
+    documents: documents.filter((doc) => String(doc.userId) === String(user._id)),
+  }));
+};
+
+// CP Shipper (US) onboarding — mandatory admin review, mirrors the driver approval
+// endpoints below. Only email/phone OTP signups carry a real 'incomplete'/'pending'
+// status; legacy password shippers default to 'approved' and never show up here.
+const getIncompleteShippers = async (req, res) => {
+  try {
+    const users = await User.find({ role: 'user', shipperApprovalStatus: 'incomplete' }).select('-passwordHash');
+    return res.json({ shippers: await attachShipperDocuments(users) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const getPendingShippers = async (req, res) => {
+  try {
+    const users = await User.find({ role: 'user', shipperApprovalStatus: 'pending' }).select('-passwordHash');
+    return res.json({ shippers: await attachShipperDocuments(users) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const getApprovedShippers = async (req, res) => {
+  try {
+    const users = await User.find({ role: 'user', shipperApprovalStatus: 'approved' }).select('-passwordHash');
+    return res.json({ shippers: await attachShipperDocuments(users) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const getRejectedShippers = async (req, res) => {
+  try {
+    const users = await User.find({ role: 'user', shipperApprovalStatus: 'rejected' }).select('-passwordHash');
+    return res.json({ shippers: await attachShipperDocuments(users) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Single shipper with documents, any status - used by the admin detail page's
+// verification panel (the status-scoped list endpoints above only cover one status).
+const getShipperById = async (req, res) => {
+  try {
+    const user = await User.findOne({ _id: req.params.id, role: 'user' }).select('-passwordHash');
+    if (!user) return res.status(404).json({ message: 'Shipper not found' });
+    const documents = await ShipperDocument.find({ userId: user._id });
+    return res.json({ shipper: { ...user.toObject(), documents } });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const approveShipper = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user || user.role !== 'user') return res.status(404).json({ message: 'Shipper not found' });
+    if (user.shipperOnboardingStep !== 'submitted') {
+      return res.status(400).json({ message: 'Shipper has not completed onboarding yet' });
+    }
+    user.shipperApprovalStatus = 'approved';
+    await user.save();
+    return res.json({ message: 'Shipper approved', shipper: user });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const rejectShipper = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id);
+    if (!user || user.role !== 'user') return res.status(404).json({ message: 'Shipper not found' });
+    user.shipperApprovalStatus = 'rejected';
+    await user.save();
+    return res.json({ message: 'Shipper rejected', shipper: user });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const attachDocuments = async (drivers) => {
+  const list = Array.isArray(drivers) ? drivers : [drivers];
+  const documents = await Document.find({ driverId: { $in: list.map((d) => d._id) } });
+  return list.map((driver) => ({
+    ...driver.toObject(),
+    documents: documents.filter((doc) => String(doc.driverId) === String(driver._id)),
+  }));
+};
 
 // Get all users with role=user (shippers) and booking stats
 const getAllShippers = async (req, res) => {
@@ -20,7 +126,16 @@ const getAllShippers = async (req, res) => {
         lastName: user.lastName,
         email: user.email,
         phone: user.phone,
+        emailVerified: user.emailVerified,
         companyName: user.companyProfile?.companyName || '',
+        companyProfile: user.companyProfile,
+        accountType: user.accountType,
+        primaryLocation: user.primaryLocation,
+        agreements: user.agreements,
+        billingProfile: user.billingProfile,
+        shipperOnboardingStep: user.shipperOnboardingStep,
+        shipperApprovalStatus: user.shipperApprovalStatus,
+        authMethod: user.authMethod,
         totalBookings,
         activeBookings,
         registeredDate: user.createdAt,
@@ -36,7 +151,11 @@ const getAllShippers = async (req, res) => {
 const getApprovedDrivers = async (req, res) => {
   try {
     const drivers = await Driver.find({ approvalStatus: 'approved' })
-      .populate('userId');
+      .populate('userId')
+      .populate('truckId');
+
+    const driverIds = drivers.map((d) => d._id);
+    const documents = await Document.find({ driverId: { $in: driverIds } });
 
     const enrichedDrivers = await Promise.all(
       drivers.map(async (driver) => {
@@ -58,7 +177,8 @@ const getApprovedDrivers = async (req, res) => {
           ...driver.toObject(),
           unpaidInvoiceCount,
           unsettledAmount,
-          planPercentage: driver.planPercentage || 0
+          planPercentage: driver.planPercentage || 0,
+          documents: documents.filter((doc) => String(doc.driverId) === String(driver._id)),
         };
       })
     );
@@ -73,8 +193,10 @@ const getApprovedDrivers = async (req, res) => {
 
 const getRejectedDrivers = async (req, res) => {
   try {
-    const drivers = await Driver.find({ approvalStatus: 'rejected' }).populate('userId', 'firstName lastName email phone role');
-    return res.json({ drivers });
+    const drivers = await Driver.find({ approvalStatus: 'rejected' })
+      .populate('userId', 'firstName lastName email phone role')
+      .populate('truckId');
+    return res.json({ drivers: await attachDocuments(drivers) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Server error' });
@@ -87,8 +209,22 @@ const Truck = require('../models/Truck');
 
 const getPendingDrivers = async (req, res) => {
   try {
-    const drivers = await Driver.find({ approvalStatus: 'pending' }).populate('userId', 'firstName lastName email phone role');
-    return res.json({ drivers });
+    const drivers = await Driver.find({ approvalStatus: 'pending' })
+      .populate('userId', 'firstName lastName email phone role')
+      .populate('truckId');
+    return res.json({ drivers: await attachDocuments(drivers) });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const getIncompleteDrivers = async (req, res) => {
+  try {
+    const drivers = await Driver.find({ approvalStatus: 'incomplete' })
+      .populate('userId', 'firstName lastName email phone role')
+      .populate('truckId');
+    return res.json({ drivers: await attachDocuments(drivers) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Server error' });
@@ -100,8 +236,12 @@ const approveDriver = async (req, res) => {
     const { id } = req.params;
     const driver = await Driver.findById(id);
     if (!driver) return res.status(404).json({ message: 'Driver not found' });
+    if (driver.onboardingStep && driver.onboardingStep !== 'submitted') {
+      return res.status(400).json({ message: 'Driver has not completed onboarding yet' });
+    }
     driver.approvalStatus = 'approved';
     driver.isOnline = false;
+    driver.availabilityStatus = 'offline';
     await driver.save();
     return res.json({ message: 'Driver approved', driver });
   } catch (err) {
@@ -117,6 +257,7 @@ const rejectDriver = async (req, res) => {
     if (!driver) return res.status(404).json({ message: 'Driver not found' });
     driver.approvalStatus = 'rejected';
     driver.isOnline = false;
+    driver.availabilityStatus = 'offline';
     await driver.save();
     return res.json({ message: 'Driver rejected', driver });
   } catch (err) {
@@ -265,8 +406,7 @@ const createDriverByAdmin = async (req, res) => {
     const verificationLink = `${apiBase}/api/auth/verify-email?token=${verificationToken}`;
 
     try {
-      await resend.emails.send({
-        from: 'VCG Transport <onboarding@resend.dev>',
+      await sendMail({
         to: email,
         subject: 'Verify your driver account email',
         html: `
@@ -304,6 +444,72 @@ const createDriverByAdmin = async (req, res) => {
     });
   } catch (err) {
     console.error('[createDriverByAdmin] Error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const inviteDriver = async (req, res) => {
+  try {
+    const { firstName, lastName, email, phone } = req.body;
+
+    if (!firstName || !lastName || !email) {
+      return res.status(400).json({ message: 'First name, last name, and email are required' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await User.findOne({ email: normalizedEmail });
+    if (existing) {
+      return res.status(409).json({ message: 'Email already in use' });
+    }
+
+    const user = await User.create({
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      email: normalizedEmail,
+      phone: phone && phone.trim() ? phone.trim() : undefined,
+      role: 'driver',
+      authMethod: 'email_otp',
+      emailVerified: false,
+    });
+
+    const driver = await Driver.create({
+      userId: user._id,
+      approvalStatus: 'incomplete',
+      onboardingStep: 'driver_info',
+    });
+
+    try {
+      await sendMail({
+        to: normalizedEmail,
+        subject: "You're invited to drive with VCG Transport",
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+            <h2>Welcome to VCG Transport</h2>
+            <p>Hello ${firstName},</p>
+            <p>You've been invited to join VCG Transport as a driver. Open the CP Driver app and sign in with this email address to verify your account:</p>
+            <p style="font-weight:600;">${normalizedEmail}</p>
+            <p>Once verified, you'll complete your driver profile and submit it for review.</p>
+          </div>
+        `,
+      });
+    } catch (mailErr) {
+      console.warn('[inviteDriver] Invitation mail failed:', mailErr.message);
+    }
+
+    return res.status(201).json({
+      message: 'Invitation sent',
+      driver,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      },
+    });
+  } catch (err) {
+    console.error('[inviteDriver] Error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -350,8 +556,7 @@ const createShipperByAdmin = async (req, res) => {
     const verificationLink = `${apiBase}/api/auth/verify-email?token=${verificationToken}`;
 
     try {
-      await resend.emails.send({
-        from: 'VCG Transport <onboarding@resend.dev>',
+      await sendMail({
         to: email,
         subject: 'Verify your shipper account email',
         html: `
@@ -388,6 +593,67 @@ const createShipperByAdmin = async (req, res) => {
     });
   } catch (err) {
     console.error('[createShipperByAdmin] Error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+const inviteShipper = async (req, res) => {
+  try {
+    const { firstName, lastName, email, phone } = req.body;
+
+    if (!firstName || !lastName || !email) {
+      return res.status(400).json({ message: 'First name, last name, and email are required' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const existing = await User.findOne({ email: normalizedEmail });
+    if (existing) {
+      return res.status(409).json({ message: 'Email already in use' });
+    }
+
+    const user = await User.create({
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      email: normalizedEmail,
+      phone: phone && phone.trim() ? phone.trim() : undefined,
+      role: 'user',
+      authMethod: 'email_otp',
+      emailVerified: false,
+      // Invited shippers still go through the full onboarding + admin review flow.
+      shipperApprovalStatus: 'incomplete',
+    });
+
+    try {
+      await sendMail({
+        to: normalizedEmail,
+        subject: "You're invited to VCG Transport",
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+            <h2>Welcome to VCG Transport</h2>
+            <p>Hello ${firstName},</p>
+            <p>You've been invited to join VCG Transport as a shipper. Open the CP Shipper app and sign in with this email address to verify your account:</p>
+            <p style="font-weight:600;">${normalizedEmail}</p>
+            <p>Once verified, you'll complete your profile.</p>
+          </div>
+        `,
+      });
+    } catch (mailErr) {
+      console.warn('[inviteShipper] Invitation mail failed:', mailErr.message);
+    }
+
+    return res.status(201).json({
+      message: 'Invitation sent',
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      },
+    });
+  } catch (err) {
+    console.error('[inviteShipper] Error:', err);
     return res.status(500).json({ message: 'Server error' });
   }
 };
@@ -456,17 +722,27 @@ const createTruckByAdmin = async (req, res) => {
 };
 
 
-module.exports = { 
-  getPendingDrivers, 
-  getApprovedDrivers, 
-  getRejectedDrivers, 
-  approveDriver, 
+module.exports = {
+  getPendingDrivers,
+  getIncompleteDrivers,
+  getApprovedDrivers,
+  getRejectedDrivers,
+  approveDriver,
   rejectDriver,
   getAllShippers,
+  getIncompleteShippers,
+  getPendingShippers,
+  getApprovedShippers,
+  getRejectedShippers,
+  getShipperById,
+  approveShipper,
+  rejectShipper,
   getDashboardStats,
   getAllTrucks,
   getTruckById,
   createDriverByAdmin,
+  inviteDriver,
   createShipperByAdmin,
+  inviteShipper,
   createTruckByAdmin,
 };

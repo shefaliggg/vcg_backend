@@ -3,8 +3,7 @@ const User = require('../models/User');
 const Driver = require('../models/Driver');
 const { signToken } = require('../config/jwt');
 
-const { Resend } = require("resend");
-const resend = new Resend(process.env.RESEND_API_KEY);
+const { sendMail } = require("../utils/mailer");
 
 const verifyEmailByToken = async (req, res) => {
   try {
@@ -139,6 +138,34 @@ const adminLogin = async (req, res) => {
 
 
 
+const changeAdminPassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: 'Current and new password are required' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ message: 'New password must be at least 8 characters', field: 'newPassword' });
+    }
+
+    const user = req.user;
+    const ok = user.passwordHash && (await bcrypt.compare(currentPassword, user.passwordHash));
+    if (!ok) {
+      return res.status(400).json({ message: 'Current password is incorrect', field: 'currentPassword' });
+    }
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ message: 'New password must be different from the current one', field: 'newPassword' });
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, 10);
+    await user.save();
+    return res.json({ success: true, message: 'Password updated' });
+  } catch (err) {
+    console.error('[CHANGE_ADMIN_PASSWORD] Error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
 const forgotPassword = async (req, res) => {
   try {
     console.log('[FORGOT_PASSWORD] Body received:', req.body);
@@ -165,9 +192,8 @@ const forgotPassword = async (req, res) => {
 
     console.log('[FORGOT_PASSWORD] Saved OTP to user record, sending email to:', email);
 
-    // Send OTP using Resend
-    const emailResponse = await resend.emails.send({
-      from: "VCG Transport <onboarding@resend.dev>", // use resend default for now
+    // Send OTP via SMTP
+    const emailResponse = await sendMail({
       to: user.email,
       subject: "Password Reset OTP",
       html: `
@@ -233,4 +259,4 @@ const verifyOtpAndResetPassword = async (req, res) => {
   }
 };
 
-module.exports = { register, login, me, adminLogin, forgotPassword, verifyOtpAndResetPassword, verifyEmailByToken };
+module.exports = { register, login, me, adminLogin, changeAdminPassword, forgotPassword, verifyOtpAndResetPassword, verifyEmailByToken };

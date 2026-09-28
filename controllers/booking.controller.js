@@ -125,18 +125,24 @@ const getAvailableBookings = async (req, res) => {
 
     const driverId = driver._id;
 
-    const bookings = await Booking.find({
+    // Open loads, including ones this driver already quoted (flagged via myQuote so the
+    // app can show "Quote Submitted"). Other drivers' quotes are never sent to the client.
+    const docs = await Booking.find({
       status: 'OPEN_FOR_QUOTES',
+      isDraft: { $ne: true },
+    }).sort({ createdAt: -1 });
 
-      // Exclude bookings where this driver already quoted
-      quotations: {
-        $not: {
-          $elemMatch: { driverId: driverId }
-        }
-      }
-    })
-      .select('-quotations')
-      .sort({ createdAt: -1 });
+    const bookings = docs.map((doc) => {
+      const obj = doc.toObject();
+      const mine = (obj.quotations || []).find(
+        (q) => q.driverId && String(q.driverId) === String(driverId)
+      );
+      delete obj.quotations;
+      obj.myQuote = mine
+        ? { price: mine.price, notes: mine.notes, createdAt: mine.createdAt }
+        : null;
+      return obj;
+    });
 
     return res.json(bookings);
 
@@ -163,13 +169,45 @@ const createBooking = async (req, res) => {
       deliveryDate,
       truckType,
       loadDetails,
+      pickupDetails,
+      deliveryDetails,
+      equipmentDetails,
+      requirements,
+      rate,
+      documents,
+      referenceNumber,
+      internalNotes,
+      isDraft,
     } = req.body;
 
     const bookingUserId = req.user?.role === 'admin' ? userId : req.user._id;
 
-    // Validate required fields (shipper/consignee optional for testing)
-    if (!bookingUserId || !pickupLocation || !deliveryLocation || !pickupDate || !truckType || !loadDetails || !loadDetails.weight) {
-      return res.status(400).json({ message: 'Missing required fields: userId, pickupLocation, deliveryLocation, pickupDate, truckType, loadDetails.weight' });
+    if (!bookingUserId) {
+      return res.status(400).json({ message: 'Missing required field: userId' });
+    }
+
+    // Mandatory admin verification gate: a shipper who hasn't cleared onboarding +
+    // admin review yet cannot post or draft loads. Legacy password accounts and
+    // admin-created shippers default to 'approved' and are unaffected.
+    if (req.user?.role === 'user' && req.user.shipperApprovalStatus !== 'approved') {
+      return res.status(403).json({
+        message: 'Your shipper account is still under admin review. You can post loads once it is approved.',
+      });
+    }
+
+    // A draft only needs an owner - everything else can be filled in later.
+    // Posting live (isDraft false/absent) needs the MVP-required fields:
+    // pickup, delivery, pickup/delivery date, commodity, weight, equipment type.
+    // No rate: the shipper posts the load, drivers quote, the shipper accepts a quote.
+    if (!isDraft) {
+      if (
+        !pickupLocation || !deliveryLocation || !pickupDate || !deliveryDate ||
+        !truckType || !loadDetails || !loadDetails.weight || !loadDetails.type
+      ) {
+        return res.status(400).json({
+          message: 'Missing required fields: pickupLocation, deliveryLocation, pickupDate, deliveryDate, truckType, loadDetails.weight, loadDetails.type',
+        });
+      }
     }
 
     const booking = new Booking({
@@ -184,12 +222,22 @@ const createBooking = async (req, res) => {
       deliveryDate,
       truckType,
       loadDetails,
+      pickupDetails,
+      deliveryDetails,
+      equipmentDetails,
+      requirements,
+      rate,
+      documents,
+      referenceNumber,
+      internalNotes,
+      isDraft: !!isDraft,
       status: 'OPEN_FOR_QUOTES',
       quotations: [],
       rateConfirmation: { status: 'not_generated' }
     });
-    await booking.save();
-    return res.status(201).json({ bookingId: booking._id, status: 'OPEN_FOR_QUOTES' });
+    // A draft is intentionally incomplete, so skip required-field validation for it.
+    await booking.save({ validateBeforeSave: !isDraft });
+    return res.status(201).json({ bookingId: booking._id, status: booking.status, isDraft: booking.isDraft });
   } catch (err) {
     return res.status(500).json({ message: 'Failed to create booking', error: err.message });
   }
@@ -219,6 +267,14 @@ const submitQuote = async (req, res) => {
     if (!booking) {
       console.log('[submitQuote] Booking NOT found');
       return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    if (
+      req.user.role === 'driver' &&
+      req.driver?._id &&
+      (booking.quotations || []).some((q) => q.driverId && String(q.driverId) === String(req.driver._id))
+    ) {
+      return res.status(400).json({ message: 'You have already submitted a quote for this load' });
     }
 
     // Ensure quotations is initialized as an array
@@ -739,12 +795,14 @@ const getBookingById = async (req, res) => {
         path: 'driverId',
         populate: { path: 'userId', select: 'firstName lastName email phone' }
       })
+      // Shipper-facing quote cards: only public profile fields, never bank/licence/DOB.
       .populate({
         path: 'quotations.driverId',
+        select: 'userId averageRating totalRatings cdlClass endorsements qualification.yearsCdlExperience vehicleType',
         populate: {
           path: 'userId',
           model: 'User',
-          select: 'firstName lastName email phone'
+          select: 'firstName lastName'
         }
       })
       .populate('truckId', 'registrationNumber truckType capacity');
@@ -836,7 +894,14 @@ const debugBooking = async (req, res) => {
 
 const getMyBookings = async (req, res) => {
   try {
-    const bookings = await Booking.find({ userId: req.user._id }).populate('userId', 'firstName lastName email phone').sort({ createdAt: -1 });
+    const bookings = await Booking.find({ userId: req.user._id })
+      .populate('userId', 'firstName lastName email phone')
+      .populate({
+        path: 'driverId',
+        populate: { path: 'userId', select: 'firstName lastName phone' },
+      })
+      .populate('truckId', 'registrationNumber truckType capacity')
+      .sort({ createdAt: -1 });
     // console.log(`getMyBookings] `User ${req.user._id}` - `found  `${bookings.length} bookings``);
     return res.json(bookings);
   } catch (err) {

@@ -13,6 +13,8 @@ const storage = multer.diskStorage({
       uploadDir = path.join('uploads', 'pods');
     } else if (req.body.uploadType === 'truck' || file.fieldname === 'truckImage') {
       uploadDir = path.join('uploads', 'trucks');
+    } else if (file.fieldname === 'bookingDocument') {
+      uploadDir = path.join('uploads', 'booking-docs');
     }
     
     // Ensure directory exists

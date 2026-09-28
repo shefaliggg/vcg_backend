@@ -18,6 +18,7 @@ const Invoice = require('./models/Invoice');
 const settlementRoutes = require('./routes/settlement.routes');
 const ratingRoutes = require('./routes/rating.routes');
 const notificationRoutes = require('./routes/notification.routes');
+const issueRoutes = require('./routes/issue.routes');
 const app = express();
 
 const defaultAllowedOrigins = [
@@ -29,6 +30,8 @@ const defaultAllowedOrigins = [
   'http://127.0.0.1:5173',
   'http://localhost:8081',
   'http://127.0.0.1:8081',
+  'http://localhost:8082',
+  'http://127.0.0.1:8082',
   'http://54.174.219.57:5000',
   'http://54.174.219.57',
 ];
@@ -166,6 +169,7 @@ app.use('/api/invoices', invoiceRoutes);
 app.use('/api/settlements', settlementRoutes);
 app.use('/api/trips', tripRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/issues', issueRoutes);
 
 
 

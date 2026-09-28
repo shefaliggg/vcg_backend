@@ -25,10 +25,19 @@ const getDriverTrips = async (req, res) => {
       pickup: trip.bookingId?.pickupLocation?.address || 'N/A',
       drop: trip.bookingId?.deliveryLocation?.address || 'N/A',
       pickupDate: trip.bookingId?.pickupDate,
+      deliveryDate: trip.bookingId?.deliveryDate,
       truckType: trip.bookingId?.truckType,
       weight: trip.bookingId?.loadDetails?.weight,
+      shipperName: trip.bookingId?.shipper?.name || (trip.bookingId?.userId ? `${trip.bookingId.userId.firstName} ${trip.bookingId.userId.lastName}` : 'N/A'),
+      shipperPhone: trip.bookingId?.shipper?.phone || trip.bookingId?.userId?.phone,
       customerName: trip.bookingId?.userId ? `${trip.bookingId.userId.firstName} ${trip.bookingId.userId.lastName}` : 'N/A',
       customerPhone: trip.bookingId?.userId?.phone,
+      rateConfirmationStatus: trip.bookingId?.rateConfirmation?.status,
+      pickupLat: trip.bookingId?.pickupLocation?.lat,
+      distance: trip.distance,
+      pickupLng: trip.bookingId?.pickupLocation?.lng,
+      dropLat: trip.bookingId?.deliveryLocation?.lat,
+      dropLng: trip.bookingId?.deliveryLocation?.lng,
       status: trip.status,
       createdAt: trip.createdAt,
       startedAt: trip.startedAt,
@@ -309,11 +318,18 @@ const getTrackingInfo = async (req, res) => {
       } : null,
       eta,
       booking: {
+        bookingId: trip.bookingId?._id,
         pickup: trip.bookingId?.pickupLocation?.address,
         pickupLocation: trip.bookingId?.pickupLocation || null,
         drop: trip.bookingId?.deliveryLocation?.address,
         dropLocation: trip.bookingId?.deliveryLocation || null,
-        pickupDate: trip.bookingId?.pickupDate
+        pickupDate: trip.bookingId?.pickupDate,
+        deliveryDate: trip.bookingId?.deliveryDate,
+        shipper: trip.bookingId?.shipper || null,
+        consignee: trip.bookingId?.consignee || null,
+        truckType: trip.bookingId?.truckType,
+        loadDetails: trip.bookingId?.loadDetails || null,
+        rateConfirmation: trip.bookingId?.rateConfirmation || null,
       }
     };
 
@@ -356,11 +372,18 @@ const getTripByBooking = async (req, res) => {
         vehicleType: trip.driverId.vehicleType
       } : null,
       booking: {
+        bookingId: trip.bookingId?._id,
         pickup: trip.bookingId?.pickupLocation?.address,
         pickupLocation: trip.bookingId?.pickupLocation || null,
         drop: trip.bookingId?.deliveryLocation?.address,
         dropLocation: trip.bookingId?.deliveryLocation || null,
-        pickupDate: trip.bookingId?.pickupDate
+        pickupDate: trip.bookingId?.pickupDate,
+        deliveryDate: trip.bookingId?.deliveryDate,
+        shipper: trip.bookingId?.shipper || null,
+        consignee: trip.bookingId?.consignee || null,
+        truckType: trip.bookingId?.truckType,
+        loadDetails: trip.bookingId?.loadDetails || null,
+        rateConfirmation: trip.bookingId?.rateConfirmation || null,
       }
     };
 
