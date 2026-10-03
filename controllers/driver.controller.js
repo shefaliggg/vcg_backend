@@ -2,6 +2,7 @@ const Driver = require('../models/Driver');
 const Truck = require('../models/Truck');
 const Document = require('../models/Document');
 const User = require('../models/User');
+const { notifyAdmins } = require('../utils/notificationService');
 
 const getDriverProfile = async (req, res) => {
   try {
@@ -62,18 +63,48 @@ const submitDriverInfo = async (req, res) => {
     const driver = await Driver.findOne({ userId: req.user._id });
     if (!driver) return res.status(404).json({ message: 'Driver record not found' });
 
-    const { firstName, lastName, dateOfBirth, address } = req.body;
+    const {
+      firstName,
+      lastName,
+      dateOfBirth,
+      address,
+      planType,
+      planPercentage,
+      accountHolderName,
+      payoutMethod,
+      paymentDetails,
+    } = req.body;
+
     if (!firstName || !lastName || !dateOfBirth) {
       return res.status(400).json({ message: 'First name, last name, and date of birth are required' });
     }
     if (!address || !address.line1 || !address.city || !address.state || !address.zip) {
       return res.status(400).json({ message: 'Full address (line1, city, state, zip) is required' });
     }
+    if (!accountHolderName || !payoutMethod || !paymentDetails) {
+      return res.status(400).json({ message: 'Plan selection and payout information are required' });
+    }
+
+    const normalizedPlanPercentage = Number(planPercentage ?? planType ?? driver.planPercentage ?? 10);
+    const validPlanPercentages = [10, 12, 17, 20];
+    const safePlanPercentage = validPlanPercentages.includes(normalizedPlanPercentage)
+      ? normalizedPlanPercentage
+      : 10;
 
     await User.findByIdAndUpdate(req.user._id, { firstName, lastName });
 
     driver.dateOfBirth = dateOfBirth;
     driver.address = { line1: address.line1, city: address.city, state: address.state, zip: address.zip };
+    driver.planType = String(planType ?? safePlanPercentage ?? '10');
+    driver.planPercentage = safePlanPercentage;
+    driver.bankDetails = {
+      ...driver.bankDetails,
+      accountHolderName: accountHolderName.trim(),
+      payoutMethod: payoutMethod.trim(),
+      paymentDetails: paymentDetails.trim(),
+      isVerified: !!driver.bankDetails?.isVerified,
+    };
+
     advanceOnboardingStep(driver, 'driver_info', 'cdl_info');
     await driver.save();
 
@@ -253,6 +284,15 @@ const submitAgreements = async (req, res) => {
     driver.onboardingStep = 'submitted';
     await driver.save();
 
+    const driverName = `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || 'A driver';
+    await notifyAdmins({
+      title: 'New driver awaiting approval',
+      body: `${driverName} submitted onboarding for review`,
+      type: 'driver_pending_approval',
+      data: { driverId: driver._id },
+      io: req.app.get('io'),
+    });
+
     return res.status(200).json({ success: true, message: 'Onboarding submitted. Await admin review.', data: driver });
   } catch (err) {
     console.error(err);
@@ -390,17 +430,22 @@ const updateBankDetails = async (req, res) => {
     if (!driver)
       return res.status(404).json({ message: "Driver not found" });
 
+    const { accountHolderName, payoutMethod, paymentDetails, bankName, accountNumber, routingNumber } = req.body;
+
     driver.bankDetails = {
-      accountHolderName: req.body.accountHolderName,
-      bankName: req.body.bankName,
-      accountNumber: req.body.accountNumber,
-      routingNumber: req.body.routingNumber,
-      isVerified: false
+      ...driver.bankDetails,
+      accountHolderName: accountHolderName ?? driver.bankDetails?.accountHolderName,
+      payoutMethod: payoutMethod ?? driver.bankDetails?.payoutMethod,
+      paymentDetails: paymentDetails ?? driver.bankDetails?.paymentDetails,
+      bankName: bankName ?? driver.bankDetails?.bankName,
+      accountNumber: accountNumber ?? driver.bankDetails?.accountNumber,
+      routingNumber: routingNumber ?? driver.bankDetails?.routingNumber,
+      isVerified: driver.bankDetails?.isVerified ?? false,
     };
 
     await driver.save();
 
-    res.json({ message: "Bank details updated successfully" });
+    res.json({ success: true, message: "Bank details updated successfully", data: driver.bankDetails });
 
   } catch (err) {
     console.error(err);

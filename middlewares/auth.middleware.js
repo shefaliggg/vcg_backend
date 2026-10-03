@@ -14,11 +14,15 @@ const requireAuth = async (req, res, next) => {
     const user = await User.findById(decoded.id);
     if (!user) return res.status(401).json({ message: 'Invalid token' });
     req.user = user;
-    console.log(`[Auth] User: ${user.firstName} ${user.lastName}, Role: ${user.role}`);
+    if (process.env.DEBUG_AUTH === 'true') {
+      console.log(`[Auth] User: ${user.firstName} ${user.lastName}, Role: ${user.role}`);
+    }
     if (user.role === 'driver') {
       const driver = await Driver.findOne({ userId: user._id });
       req.driver = driver;
-      console.log(`[Auth] Driver found: ${driver?._id}`);
+      if (process.env.DEBUG_AUTH === 'true') {
+        console.log(`[Auth] Driver found: ${driver?._id}`);
+      }
     }
     next();
   } catch (err) {

@@ -35,7 +35,8 @@ const EXCEPTION_FLAGS = ['driver_declined', 'delayed', 'delivery_issue'];
 
 const fullName = (user) => (user ? `${user.firstName || ''} ${user.lastName || ''}`.trim() : '') || null;
 
-const loadNumber = (booking) => booking.referenceNumber || `#${String(booking._id).slice(-6)}`;
+const loadNumber = (booking) => booking.loadNumber || booking.referenceNumber || `#${String(booking._id).slice(-6)}`;
+const idOf = (value) => String(value?._id || value);
 
 // Booking.status is written inconsistently (upper and lower case), so the stage is derived
 // from the driver assignment and the latest trip instead of trusting booking.status alone.
@@ -51,7 +52,7 @@ const deriveStage = (booking, trip, hasQuotes, wasDeclined) => {
 const resolveStage = (booking, bookingTrips) => {
   const wasDeclined = !booking.driverId && bookingTrips.some((t) => t.status === 'rejected');
   const trip = booking.driverId
-    ? bookingTrips.find((t) => t.status !== 'rejected' && String(t.driverId) === String(booking.driverId._id || booking.driverId))
+    ? bookingTrips.find((t) => t.status !== 'rejected' && idOf(t.driverId) === idOf(booking.driverId))
     : null;
   const stage = deriveStage(booking, trip, (booking.quotations || []).length > 0, wasDeclined);
   return { trip, wasDeclined, stage };
@@ -262,8 +263,8 @@ const getDashboardOverview = async (req, res) => {
 };
 
 // POST /admin/bookings/:id/assign  { driverId }
-// Mirrors booking.controller selectQuote: the driver is attached and a Trip is created, and the
-// booking then goes through the normal rate-confirmation (shipper signs, driver accepts) flow.
+// Mirrors booking.controller selectQuote: the driver is attached and a Trip is created, then the
+// agreed carrier rate goes through admin review before the driver acknowledges the confirmation.
 const assignDriverToBooking = async (req, res) => {
   try {
     const { driverId } = req.body;
@@ -272,6 +273,9 @@ const assignDriverToBooking = async (req, res) => {
     const booking = await Booking.findById(req.params.id);
     if (!booking) return res.status(404).json({ message: 'Booking not found' });
     if (booking.isDraft) return res.status(400).json({ message: 'A draft load cannot be assigned' });
+    if (!['OPEN_FOR_QUOTES', 'open_for_quotes'].includes(booking.status)) {
+      return res.status(409).json({ message: 'Approve this load before assigning a driver' });
+    }
     if (booking.driverId) return res.status(409).json({ message: 'This load already has a driver' });
 
     const driver = await Driver.findById(driverId);
@@ -279,19 +283,41 @@ const assignDriverToBooking = async (req, res) => {
     if (driver.approvalStatus !== 'approved') return res.status(400).json({ message: 'Driver is not approved' });
 
     const quote = (booking.quotations || []).find((q) => String(q.driverId) === String(driver._id));
+    const agreedRate = quote?.price ?? booking.rate?.offeredRate;
+    if (!(agreedRate > 0)) {
+      return res.status(400).json({ message: 'An agreed carrier rate is required before assigning a driver' });
+    }
 
     booking.driverId = driver._id;
+    booking.selectedQuote = {
+      quotedBy: quote ? 'driver' : 'admin',
+      driverId: driver._id,
+      price: agreedRate,
+      currency: 'USD',
+      notes: quote?.notes,
+      selectedAt: new Date(),
+      selectedByRole: 'Admin',
+      selectedByName: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
+    booking.$locals.statusActor = {
+      role: 'Admin',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
     booking.status = 'CONFIRMED';
     booking.rateConfirmation = {
-      status: 'awaiting_user_signature',
+      status: 'awaiting_admin_approval',
       driverId: driver._id,
-      amount: quote?.price ?? booking.rate?.offeredRate,
-      generatedAt: new Date(),
+      amount: agreedRate,
     };
     await booking.save();
 
     const existingTrip = await Trip.findOne({ bookingId: booking._id, driverId: driver._id, status: { $ne: 'rejected' } });
-    const trip = existingTrip || await Trip.create({ bookingId: booking._id, driverId: driver._id, status: 'assigned', currentLocation: {} });
+    let trip = existingTrip;
+    if (!trip) {
+      trip = new Trip({ bookingId: booking._id, driverId: driver._id, status: 'assigned', currentLocation: {} });
+      trip.$locals.statusActor = booking.$locals.statusActor;
+      await trip.save();
+    }
 
     return res.json({ message: 'Driver assigned', bookingId: booking._id, tripId: trip._id });
   } catch (err) {

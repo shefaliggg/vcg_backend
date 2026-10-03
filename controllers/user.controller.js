@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const ShipperDocument = require('../models/ShipperDocument');
+const { notifyAdmins } = require('../utils/notificationService');
 
 // CP Shipper (US) onboarding — step order used to decide whether a save should
 // advance shipperOnboardingStep (only moves forward, editing an earlier step later
@@ -455,6 +456,17 @@ const submitShipperApplication = async (req, res) => {
     user.shipperOnboardingStep = 'submitted';
     user.shipperApprovalStatus = 'pending';
     await user.save();
+
+    const shipperName = `${user.firstName || ''} ${user.lastName || ''}`.trim()
+      || user.companyProfile?.companyName
+      || 'A shipper';
+    await notifyAdmins({
+      title: 'New shipper awaiting approval',
+      body: `${shipperName} submitted an application for review`,
+      type: 'shipper_pending_approval',
+      data: { userId: user._id },
+      io: req.app.get('io'),
+    });
 
     return res.json({ success: true, message: 'Application submitted. Await admin review.', data: user });
   } catch (err) {

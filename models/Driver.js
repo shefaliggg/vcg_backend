@@ -3,6 +3,12 @@ const mongoose = require('mongoose');
 const DriverSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    carrierProfile: {
+      legalName: { type: String },
+      dba: { type: String },
+      mcNumber: { type: String },
+      dotNumber: { type: String },
+    },
 
     // CDL Information (licenseNumber/licenseExpiry kept as field names, reinterpreted as CDL#/expiry)
     licenseNumber: { type: String },
@@ -68,6 +74,8 @@ const DriverSchema = new mongoose.Schema(
 
     bankDetails: {
       accountHolderName: { type: String },
+      payoutMethod: { type: String },
+      paymentDetails: { type: String },
       bankName: { type: String },
       accountNumber: { type: String },
       routingNumber: { type: String },

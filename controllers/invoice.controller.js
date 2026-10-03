@@ -1,6 +1,30 @@
 const Invoice = require('../models/Invoice');
+const Trip = require('../models/Trip');
 const stripe = require("../config/stripe");
 const bankDetails = require("../config/bankDetails");
+
+// GET /api/invoices/by-booking/:bookingId - shipper's Financial Summary card.
+// The invoice is only created once the POD is approved (see trip.controller.js
+// approvePOD), so before that this returns { invoice: null } and the frontend
+// falls back to displaying the rate confirmation amount.
+const getInvoiceByBooking = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const trip = await Trip.findOne({ bookingId });
+    if (!trip) return res.json({ invoice: null });
+
+    const invoice = await Invoice.findOne({ trip: trip._id });
+    if (!invoice) return res.json({ invoice: null });
+
+    if (invoice.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Not authorized to view this invoice' });
+    }
+
+    return res.json({ invoice });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch invoice' });
+  }
+};
 const getAllInvoices = async (req, res) => {
   try {
     const invoices = await Invoice.find()
@@ -187,4 +211,4 @@ const confirmBankTransfer = async (req, res) => {
   res.json({ message: "Payment confirmed" });
 };
 
-module.exports = { getAllInvoices, getMyInvoices, selectPaymentMethod, payInvoice,confirmBankTransfer };
+module.exports = { getAllInvoices, getMyInvoices, getInvoiceByBooking, selectPaymentMethod, payInvoice, confirmBankTransfer };

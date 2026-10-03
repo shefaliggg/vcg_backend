@@ -8,6 +8,13 @@ const TripSchema = new mongoose.Schema({
     enum: ['assigned', 'accepted', 'rejected', 'going_to_pickup', 'arrived_at_pickup', 'loading', 'loaded', 'in_transit', 'arrived_at_drop', 'delivered', 'completed','pod_uploaded','pod_approved','pod_rejected'], 
     default: 'assigned' 
   },
+  statusHistory: [{
+    status: { type: String, required: true },
+    changedAt: { type: Date, default: Date.now },
+    actorRole: { type: String, default: 'System' },
+    actorName: { type: String },
+    note: { type: String },
+  }],
   currentLocation: {
     lat: { type: Number },
     lng: { type: Number },
@@ -23,5 +30,19 @@ const TripSchema = new mongoose.Schema({
   driverPayout: { type: Number, default: 0 },
   planPercentageUsed: { type: Number, default: 10 }
 }, { timestamps: true });
+
+TripSchema.pre('save', function recordStatusChange(next) {
+  if (this.isNew || this.isModified('status')) {
+    const actor = this.$locals.statusActor || {};
+    this.statusHistory.push({
+      status: this.status,
+      changedAt: new Date(),
+      actorRole: actor.role || 'System',
+      actorName: actor.name,
+      note: this.$locals.statusNote,
+    });
+  }
+  next();
+});
 
 module.exports = mongoose.model('Trip', TripSchema);

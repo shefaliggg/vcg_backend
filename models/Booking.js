@@ -50,6 +50,7 @@ const BookingSchema = new mongoose.Schema({
     windowStart: { type: String },
     windowEnd: { type: String },
     appointmentRequired: { type: Boolean, default: false },
+    appointmentNumber: { type: String },
     contactName: { type: String },
     contactPhone: { type: String },
     instructions: { type: String },
@@ -59,6 +60,7 @@ const BookingSchema = new mongoose.Schema({
     windowStart: { type: String },
     windowEnd: { type: String },
     appointmentRequired: { type: Boolean, default: false },
+    appointmentNumber: { type: String },
     contactName: { type: String },
     contactPhone: { type: String },
     instructions: { type: String },
@@ -80,6 +82,9 @@ const BookingSchema = new mongoose.Schema({
     unloadingType: { type: String, enum: ['live_unload', 'drop_hook'] },
     driverRequirements: { type: String },
     insuranceRequirements: { type: String },
+    trackingRequirements: { type: String },
+    cancellationTerms: { type: String },
+    documentRequirements: { type: String },
     otherRequirements: { type: String },
   },
 
@@ -101,6 +106,7 @@ const BookingSchema = new mongoose.Schema({
   ],
 
   referenceNumber: { type: String },
+  loadNumber: { type: String, unique: true, sparse: true },
   internalNotes: { type: String },
   // A draft is a persisted, incomplete Post Load form - excluded from the
   // driver-facing available-loads feed until the shipper actually posts it.
@@ -114,13 +120,26 @@ const BookingSchema = new mongoose.Schema({
       createdAt: { type: Date, default: Date.now }
     }
   ],
+  selectedQuote: {
+    quotedBy: { type: String },
+    driverId: { type: mongoose.Schema.Types.ObjectId, ref: 'Driver' },
+    price: { type: Number },
+    currency: { type: String },
+    notes: { type: String },
+    selectedAt: { type: Date },
+    selectedByRole: { type: String },
+    selectedByName: { type: String },
+  },
   rateConfirmation: {
   status: {
     type: String,
    enum: [
   'not_generated',
+  'awaiting_admin_approval',
   'awaiting_user_signature',
   'user_signed',
+  'awaiting_carrier_acknowledgment',
+  'carrier_acknowledged',
   'driver_accepted'
 ],
     default: 'not_generated'
@@ -135,7 +154,17 @@ const BookingSchema = new mongoose.Schema({
   userSignedAt: { type: Date },
   driverAcceptedAt: { type: Date },
   userSignatureUrl: { type: String },
-  driverSignatureUrl: { type: String }
+  driverSignatureUrl: { type: String },
+  approvedAt: { type: Date },
+  approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  acknowledgedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  acknowledgedByName: { type: String },
+  acknowledgedAt: { type: Date },
+  acknowledgmentAudit: {
+    ip: { type: String },
+    userAgent: { type: String },
+    device: { type: String },
+  }
 },
   status: {
     type: String,
@@ -144,9 +173,29 @@ const BookingSchema = new mongoose.Schema({
     // updateTripStatus) - the two drifted apart because those writes use
     // findByIdAndUpdate, which skips validators by default and so never surfaced
     // the mismatch as an error.
-    enum: ['OPEN_FOR_QUOTES', 'CONFIRMED', 'IN_PROGRESS', 'DELIVERED', 'ACCEPTED', 'confirmed', 'in_progress', 'completed'],
-    default: 'OPEN_FOR_QUOTES'
+    enum: [
+      'PENDING_APPROVAL',
+      'REJECTED',
+      'OPEN_FOR_QUOTES',
+      'CONFIRMED',
+      'IN_PROGRESS',
+      'DELIVERED',
+      'ACCEPTED',
+      'pending_approval',
+      'rejected',
+      'confirmed',
+      'in_progress',
+      'completed'
+    ],
+    default: 'PENDING_APPROVAL'
   },
+  statusHistory: [{
+    status: { type: String, required: true },
+    changedAt: { type: Date, default: Date.now },
+    actorRole: { type: String, default: 'System' },
+    actorName: { type: String },
+    note: { type: String },
+  }],
   currentLocation: {
     latitude: Number,
     longitude: Number,
@@ -158,5 +207,50 @@ const BookingSchema = new mongoose.Schema({
     endedAt: Date,
   }
 }, { timestamps: true });
+
+BookingSchema.pre('save', function recordStatusChange(next) {
+  if (this.isNew || this.isModified('status')) {
+    const actor = this.$locals.statusActor || {};
+    this.statusHistory.push({
+      status: this.status,
+      changedAt: new Date(),
+      actorRole: actor.role || 'System',
+      actorName: actor.name,
+      note: this.$locals.statusNote,
+    });
+  }
+  next();
+});
+
+BookingSchema.pre('findOneAndUpdate', async function recordStatusUpdate() {
+  const update = this.getUpdate() || {};
+  const nextStatus = update.status ?? update.$set?.status;
+  if (!nextStatus) return;
+
+  const booking = await this.model.findOne(this.getQuery()).select('status');
+  if (!booking || booking.status === nextStatus) return;
+
+  const normalizedUpdate = Object.entries(update).reduce((result, [key, value]) => {
+    if (key.startsWith('$')) {
+      result[key] = key === '$set' ? { ...value } : value;
+    } else {
+      result.$set = { ...result.$set, [key]: value };
+    }
+    return result;
+  }, {});
+
+  this.setUpdate({
+    ...normalizedUpdate,
+    $push: {
+      ...update.$push,
+      statusHistory: {
+        status: nextStatus,
+        changedAt: new Date(),
+        actorRole: this.getOptions().statusActor?.role || 'System',
+        actorName: this.getOptions().statusActor?.name,
+      },
+    },
+  });
+});
 
 module.exports = mongoose.model('Booking', BookingSchema);

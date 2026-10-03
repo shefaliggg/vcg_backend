@@ -1,4 +1,5 @@
 const Issue = require('../models/Issue');
+const { notifyAdmins } = require('../utils/notificationService');
 
 const ISSUE_CATEGORIES = ['vehicle_breakdown', 'accident', 'delay', 'load_issue', 'facility_issue', 'other'];
 
@@ -20,6 +21,14 @@ const reportIssue = async (req, res) => {
       tripId: tripId || undefined,
       category,
       description: description.trim(),
+    });
+
+    await notifyAdmins({
+      title: 'Driver reported an issue',
+      body: description.trim().slice(0, 120),
+      type: 'issue_reported',
+      data: { issueId: issue._id, category },
+      io: req.app.get('io'),
     });
 
     return res.status(201).json({ success: true, data: issue });

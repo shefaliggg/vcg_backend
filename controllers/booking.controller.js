@@ -1,4 +1,5 @@
-const { createAndSendNotification } = require('../utils/notificationService');
+const { createAndSendNotification, notifyAdmins } = require('../utils/notificationService');
+const { loadNumber } = require('./dashboard.controller');
 
 // GET /api/bookings/:id/raw (debug: print raw MongoDB document)
 const getBookingRaw = async (req, res) => {
@@ -10,7 +11,7 @@ const getBookingRaw = async (req, res) => {
     return res.status(500).json({ message: 'Failed to fetch raw booking', error: err.message });
   }
 };
-// GET /api/bookings/for-driver - bookings for the logged-in driver where user has signed
+// GET /api/bookings/for-driver - confirmations awaiting the assigned driver's acknowledgment
 const getDriverConfirmations = async (req, res) => {
   try {
     const driver = await Driver.findOne({ userId: req.user._id });
@@ -23,7 +24,7 @@ const getDriverConfirmations = async (req, res) => {
 
     const bookings = await Booking.find({
       driverId: driverId,
-      'rateConfirmation.status': 'user_signed'
+      'rateConfirmation.status': { $in: ['awaiting_carrier_acknowledgment', 'user_signed'] }
     })
       .populate('userId', 'firstName lastName email phone')
       .populate('quotations.driverId', 'firstName lastName email phone')
@@ -77,8 +78,18 @@ const fs = require('fs');
 const path = require('path');
 const PDFDocument = require('pdfkit');
 const Booking = require('../models/Booking');
+const Counter = require('../models/Counter');
 const User = require('../models/User');
 const Driver = require('../models/Driver');
+
+const nextLoadNumber = async () => {
+  const counter = await Counter.findOneAndUpdate(
+    { _id: 'load-number' },
+    { $inc: { sequence: 1 } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+  return `CP-${String(counter.sequence).padStart(5, '0')}`;
+};
 
 
 const ensureDir = (dirPath) => {
@@ -93,6 +104,53 @@ const getAdminProfile = async () => {
 };
 
 
+
+// Admin approval workflow: a posted load should not become visible to drivers until
+// an admin approves it. Pending reviews are kept out of the driver-facing feed.
+const approveBooking = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    if (booking.isDraft) {
+      return res.status(400).json({ message: 'Draft loads cannot be approved for bidding' });
+    }
+    if (!['PENDING_APPROVAL', 'pending_approval'].includes(booking.status)) {
+      return res.status(409).json({ message: 'Only loads pending admin review can be approved' });
+    }
+
+    booking.$locals.statusActor = {
+      role: 'Admin',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
+    booking.status = 'OPEN_FOR_QUOTES';
+    await booking.save();
+    return res.json({ message: 'Load approved and is now live for bidding', booking });
+  } catch (err) {
+    console.error('[approveBooking] ERROR:', err);
+    return res.status(500).json({ message: 'Failed to approve booking', error: err.message });
+  }
+};
+
+const rejectBooking = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    if (booking.isDraft) {
+      return res.status(400).json({ message: 'Draft loads cannot be rejected' });
+    }
+
+    booking.$locals.statusActor = {
+      role: 'Admin',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
+    booking.status = 'REJECTED';
+    await booking.save();
+    return res.json({ message: 'Load rejected by admin', booking });
+  } catch (err) {
+    console.error('[rejectBooking] ERROR:', err);
+    return res.status(500).json({ message: 'Failed to reject booking', error: err.message });
+  }
+};
 
 // Get all bookings (admin only)
 const getAllBookings = async (req, res) => {
@@ -128,7 +186,7 @@ const getAvailableBookings = async (req, res) => {
     // Open loads, including ones this driver already quoted (flagged via myQuote so the
     // app can show "Quote Submitted"). Other drivers' quotes are never sent to the client.
     const docs = await Booking.find({
-      status: 'OPEN_FOR_QUOTES',
+      status: { $in: ['OPEN_FOR_QUOTES', 'open_for_quotes'] },
       isDraft: { $ne: true },
     }).sort({ createdAt: -1 });
 
@@ -212,6 +270,7 @@ const createBooking = async (req, res) => {
 
     const booking = new Booking({
       userId: bookingUserId,
+      loadNumber: await nextLoadNumber(),
       driverId: driverId || undefined,
       truckId: truckId || undefined,
       shipper: shipper || { name: 'TBD', phone: 'TBD' },
@@ -231,13 +290,29 @@ const createBooking = async (req, res) => {
       referenceNumber,
       internalNotes,
       isDraft: !!isDraft,
-      status: 'OPEN_FOR_QUOTES',
+      status: isDraft ? 'OPEN_FOR_QUOTES' : 'PENDING_APPROVAL',
       quotations: [],
       rateConfirmation: { status: 'not_generated' }
     });
     // A draft is intentionally incomplete, so skip required-field validation for it.
     await booking.save({ validateBeforeSave: !isDraft });
-    return res.status(201).json({ bookingId: booking._id, status: booking.status, isDraft: booking.isDraft });
+
+    if (!isDraft) {
+      await notifyAdmins({
+        title: `New load awaiting review - ${loadNumber(booking)}`,
+        body: `${booking.pickupLocation?.address || 'N/A'} → ${booking.deliveryLocation?.address || 'N/A'}`,
+        type: 'booking_pending_approval',
+        data: { bookingId: booking._id, loadNumber: loadNumber(booking) },
+        io: req.app.get('io'),
+      });
+    }
+
+    return res.status(201).json({
+      bookingId: booking._id,
+      loadNumber: booking.loadNumber,
+      status: booking.status,
+      isDraft: booking.isDraft,
+    });
   } catch (err) {
     return res.status(500).json({ message: 'Failed to create booking', error: err.message });
   }
@@ -248,6 +323,10 @@ const submitQuote = async (req, res) => {
   try {
     const { id } = req.params;
     const { price, notes, driverId } = req.body;
+
+    if (!['driver', 'admin'].includes(req.user?.role)) {
+      return res.status(403).json({ message: 'Only drivers and admins can submit quotes' });
+    }
 
     console.log(`\n====== [submitQuote] START ======`);
     console.log(`Booking ID: ${id}`);
@@ -267,6 +346,12 @@ const submitQuote = async (req, res) => {
     if (!booking) {
       console.log('[submitQuote] Booking NOT found');
       return res.status(404).json({ message: 'Booking not found' });
+    }
+    if (req.user.role === 'driver' && !req.driver?._id) {
+      return res.status(403).json({ message: 'Driver profile not found' });
+    }
+    if (booking.isDraft || !['OPEN_FOR_QUOTES', 'open_for_quotes'].includes(booking.status)) {
+      return res.status(409).json({ message: 'This load is not open for bidding yet' });
     }
 
     if (
@@ -319,11 +404,12 @@ const submitQuote = async (req, res) => {
     console.log(`[submitQuote] Booking saved. Verifying...`);
     await createAndSendNotification({
       userId: booking.userId,
-      title: "New Quote Received",
-      body: "A driver has submitted a quote for your booking.",
+      title: `New Quote Received - ${loadNumber(booking)}`,
+      body: `${booking.pickupLocation?.address || 'N/A'} → ${booking.deliveryLocation?.address || 'N/A'}`,
       data: {
         type: "quote_submitted",
-        bookingId: booking._id
+        bookingId: booking._id,
+        loadNumber: loadNumber(booking)
       }
     });
 
@@ -355,6 +441,12 @@ const selectQuote = async (req, res) => {
     const booking = await Booking.findById(id);
     if (!booking) {
       return res.status(404).json({ message: 'Booking not found' });
+    }
+    if (req.user?.role !== 'admin' && (req.user?.role !== 'user' || String(booking.userId) !== String(req.user._id))) {
+      return res.status(403).json({ message: 'Only the owning shipper or an admin can select a quote' });
+    }
+    if (booking.isDraft || !['OPEN_FOR_QUOTES', 'open_for_quotes'].includes(booking.status)) {
+      return res.status(409).json({ message: 'This load is not open for quote selection yet' });
     }
 
     if (!Array.isArray(booking.quotations) || quoteIndex < 0 || quoteIndex >= booking.quotations.length) {
@@ -392,20 +484,33 @@ const selectQuote = async (req, res) => {
       currency: selectedQuote.currency || 'USD',
       notes: selectedQuote.notes,
       selectedAt: new Date(),
+      selectedByRole: req.user?.role === 'admin' ? 'Admin' : 'Shipper',
+      selectedByName: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
     };
 
     booking.driverId = selectedQuote.driverId;
+    booking.$locals.statusActor = {
+      role: booking.selectedQuote.selectedByRole,
+      name: booking.selectedQuote.selectedByName,
+    };
     booking.status = 'CONFIRMED';
 
     // 🔥 IMPORTANT: DO NOT GENERATE PDF HERE
     booking.rateConfirmation = {
-      status: 'awaiting_user_signature',
+      status: 'awaiting_admin_approval',
       driverId: selectedQuote.driverId,
       amount: selectedQuote.price,
-      generatedAt: new Date(),
     };
 
     await booking.save();
+
+    await notifyAdmins({
+      title: `Rate Confirmation Review - ${loadNumber(booking)}`,
+      body: `Review the accepted carrier quote of ${selectedQuote.price} USD before issuing the confirmation.`,
+      type: 'rate_confirmation_pending_approval',
+      data: { bookingId: booking._id, loadNumber: loadNumber(booking) },
+      io: req.app.get('io'),
+    });
 
     // -------------------------
     // Ensure Trip exists
@@ -477,8 +582,7 @@ const buildRateConfirmationPdf = async ({
   adminProfile,
   driver,
   selectedQuote,
-  userSignaturePath = null,
-  driverSignaturePath = null
+  acknowledgment = null
 }) => {
 
   const uploadsDir = path.join(__dirname, '..', 'uploads', 'rate-confirmations');
@@ -494,144 +598,104 @@ const buildRateConfirmationPdf = async ({
 
   const primary = '#111';
   const grey = '#666';
-
-  const sectionSpacing = () => doc.moveDown(1);
-
-  const labelValue = (label, value) => {
-    doc.fontSize(10)
-      .fillColor(grey)
-      .text(label.toUpperCase())
-      .moveDown(0.2)
-      .fontSize(12)
-      .fillColor(primary)
-      .text(value || 'N/A')
-      .moveDown(0.8);
+  const shipper = user?.companyProfile || {};
+  const driverUser = driver?.userId || {};
+  const carrierName = driver?.carrierProfile?.legalName || driverUser.companyProfile?.companyName
+    || `${driverUser.firstName || ''} ${driverUser.lastName || ''}`.trim();
+  const loadNumberValue = loadNumber(booking);
+  const formatDate = (value) => value ? new Date(value).toLocaleDateString() : 'N/A';
+  const formatAddress = (location) => location?.address || 'N/A';
+  const section = (title) => {
+    doc.moveDown(0.6).fontSize(13).font('Helvetica-Bold').fillColor(primary).text(title.toUpperCase());
+    doc.moveDown(0.25);
+  };
+  const field = (label, value) => {
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(grey).text(`${label}: `, { continued: true });
+    doc.font('Helvetica').fillColor(primary).text(value || 'N/A');
   };
 
-  /* ================= HEADER ================= */
+  doc.fontSize(19).font('Helvetica-Bold').fillColor(primary).text('VCG TRANSPORT', { align: 'center' });
+  doc.fontSize(17).text('RATE CONFIRMATION', { align: 'center' });
+  doc.moveDown(0.4).fontSize(10).font('Helvetica').fillColor(primary)
+    .text(`Rate Confirmation #: RC-${loadNumberValue}`, { align: 'center' })
+    .text(`Load #: ${loadNumberValue}  |  Issue date: ${formatDate(booking.rateConfirmation?.generatedAt)}`, { align: 'center' })
+    .text(`Status: ${acknowledgment ? 'Carrier Acknowledged' : 'Awaiting Carrier Acknowledgment'}`, { align: 'center' });
+  doc.moveDown(0.4).moveTo(40, doc.y).lineTo(555, doc.y).strokeColor('#bbb').stroke();
 
-  doc.fontSize(22).font('Helvetica-Bold').text('RATE CONFIRMATION', { align: 'center' });
-  doc.moveDown(0.5);
-  doc.fontSize(10).font('Helvetica')
-    .text(`Booking ID: ${booking._id}`, { align: 'center' })
-    .text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' });
+  section('Broker Information');
+  field('Broker', 'VCG Transport');
+  field('Address', adminProfile?.address || process.env.VCG_TRANSPORT_ADDRESS);
+  field('Phone', adminProfile?.dispatcherPhone || process.env.VCG_TRANSPORT_PHONE);
+  field('Email', adminProfile?.dispatcherEmail || process.env.VCG_TRANSPORT_EMAIL);
+  field('MC / DOT', adminProfile?.mcNumber || adminProfile?.dotNumber || process.env.VCG_TRANSPORT_MC_DOT);
 
-  sectionSpacing();
+  section('Carrier / Driver Information');
+  field('Carrier legal name', carrierName);
+  field('DBA', driver?.carrierProfile?.dba);
+  field('Driver', `${driverUser.firstName || ''} ${driverUser.lastName || ''}`.trim());
+  field('Phone', driverUser.phone);
+  field('MC / DOT', [driver?.carrierProfile?.mcNumber, driver?.carrierProfile?.dotNumber].filter(Boolean).join(' / '));
 
-  doc.moveTo(40, doc.y).lineTo(555, doc.y).strokeColor('#ddd').stroke();
-  sectionSpacing();
+  section('Shipper Information');
+  field('Company', shipper.companyName || `${user?.firstName || ''} ${user?.lastName || ''}`.trim());
+  field('Pickup contact', booking.shipper?.name);
+  field('Phone', booking.shipper?.phone || shipper.phone || user?.phone);
+  field('Email', shipper.email || user?.email);
 
-  /* ================= CUSTOMER ================= */
+  section('Load Information');
+  field('Commodity', booking.loadDetails?.type || booking.loadDetails?.description);
+  field('Equipment type', booking.truckType);
+  field('Weight', booking.loadDetails?.weight ? `${booking.loadDetails.weight} lb` : null);
+  field('Pieces / pallets', booking.loadDetails?.pieces || booking.loadDetails?.totalQuantity);
+  const dimensions = booking.loadDetails?.dimensions;
+  field('Dimensions', dimensions && [dimensions.length, dimensions.width, dimensions.height].some(Boolean)
+    ? `${dimensions.length || '?'} x ${dimensions.width || '?'} x ${dimensions.height || '?'}` : null);
+  field('Temperature', booking.equipmentDetails?.temperatureRequirements);
+  field('Hazmat', booking.requirements?.hazmat ? 'Yes' : 'No');
+  field('Special handling', [booking.equipmentDetails?.specialEquipment, booking.requirements?.otherRequirements].filter(Boolean).join('; '));
 
-  doc.fontSize(14).font('Helvetica-Bold').text('CUSTOMER INFORMATION');
-  doc.moveDown(0.5);
+  section('Pickup Details');
+  field('Company', booking.shipper?.name);
+  field('Address', formatAddress(booking.pickupLocation));
+  field('Date', formatDate(booking.pickupDate));
+  field('Time / window', booking.pickupDetails?.time || [booking.pickupDetails?.windowStart, booking.pickupDetails?.windowEnd].filter(Boolean).join(' - '));
+  field('Appointment #', booking.pickupDetails?.appointmentNumber);
+  field('Contact', booking.pickupDetails?.contactName);
+  field('Phone', booking.pickupDetails?.contactPhone || booking.shipper?.phone);
+  field('Instructions', booking.pickupDetails?.instructions);
 
-  const cp = user.companyProfile || {};
+  section('Delivery Details');
+  field('Company', booking.consignee?.name);
+  field('Address', formatAddress(booking.deliveryLocation));
+  field('Date', formatDate(booking.deliveryDate));
+  field('Time / window', booking.deliveryDetails?.time || [booking.deliveryDetails?.windowStart, booking.deliveryDetails?.windowEnd].filter(Boolean).join(' - '));
+  field('Appointment #', booking.deliveryDetails?.appointmentNumber);
+  field('Contact', booking.deliveryDetails?.contactName);
+  field('Phone', booking.deliveryDetails?.contactPhone || booking.consignee?.phone);
+  field('Instructions', booking.deliveryDetails?.instructions);
 
-  labelValue('Company', cp.companyName || `${user.firstName} ${user.lastName}`);
-  labelValue('Email', cp.email || user.email);
-  labelValue('Phone', cp.phone || user.phone);
-  if (cp.billingAddress) labelValue('Billing Address', cp.billingAddress);
+  section('Agreed Carrier Rate');
+  field('Carrier rate / linehaul', `${selectedQuote?.price || booking.rateConfirmation?.amount || 0} ${selectedQuote?.currency || 'USD'}`);
+  field('Approved accessorials', 'Detention: As agreed; Layover: As agreed');
+  field('Total carrier pay', `${selectedQuote?.price || booking.rateConfirmation?.amount || 0} ${selectedQuote?.currency || 'USD'}`);
+  if (selectedQuote?.notes) field('Rate notes', selectedQuote.notes);
 
-  sectionSpacing();
+  section('Special Terms & Instructions');
+  field('Tracking', booking.requirements?.trackingRequirements || 'Maintain shipment tracking as required by VCG Transport.');
+  field('Appointments', 'Follow all pickup and delivery appointment requirements shown above.');
+  field('Accessorials / cancellation', [booking.requirements?.cancellationTerms, booking.rate?.paymentTerms, 'Detention and layover must be agreed with VCG Transport.'].filter(Boolean).join('; '));
+  field('Other instructions', [booking.loadDetails?.description, booking.requirements?.driverRequirements, booking.requirements?.insuranceRequirements, booking.requirements?.otherRequirements].filter(Boolean).join('; '));
 
-  /* ================= ROUTE ================= */
+  section('Document Requirements');
+  field('Required documents', booking.requirements?.documentRequirements || 'Signed BOL, proof of delivery, and delivery receipt. Provide photos when required for this load.');
 
-  doc.fontSize(14).font('Helvetica-Bold').text('ROUTE DETAILS');
-  doc.moveDown(0.5);
-
-  labelValue('Pickup Location', booking.pickupLocation?.address);
-  labelValue('Delivery Location', booking.deliveryLocation?.address);
-  labelValue('Pickup Date', booking.pickupDate ? new Date(booking.pickupDate).toDateString() : '');
-
-  if (booking.deliveryDate) {
-    labelValue('Delivery Date', new Date(booking.deliveryDate).toDateString());
-  }
-
-  sectionSpacing();
-
-  /* ================= LOAD DETAILS ================= */
-
-  doc.fontSize(14).font('Helvetica-Bold').text('LOAD DETAILS');
-  doc.moveDown(0.5);
-
-  labelValue('Truck Type', booking.truckType);
-  labelValue('Weight', booking.loadDetails?.weight);
-  labelValue('Commodity', booking.loadDetails?.commodity || 'General Freight');
-
-  sectionSpacing();
-
-  /* ================= DRIVER ================= */
-
-  doc.fontSize(14).font('Helvetica-Bold').text('DRIVER INFORMATION');
-  doc.moveDown(0.5);
-
-  if (driver) {
-    labelValue('Driver Name', `${driver.userId?.firstName} ${driver.userId?.lastName}`);
-    labelValue('Phone', driver.userId?.phone);
-    labelValue('Vehicle Number', driver.vehicleNumber);
-  }
-
-  sectionSpacing();
-
-  /* ================= RATE ================= */
-
-  doc.fontSize(14).font('Helvetica-Bold').text('RATE INFORMATION');
-  doc.moveDown(0.5);
-
-  if (selectedQuote) {
-    labelValue('Rate', `${selectedQuote.price} ${selectedQuote.currency || 'USD'}`);
-    if (selectedQuote.notes) {
-      labelValue('Notes', selectedQuote.notes);
-    }
-  }
-
-  sectionSpacing();
-  doc.moveTo(40, doc.y).lineTo(555, doc.y).strokeColor('#ddd').stroke();
-  sectionSpacing();
-
-  /* ================= AGREEMENT TEXT ================= */
-
-  doc.fontSize(10)
-    .fillColor(grey)
-    .text(
-      'By signing below, both parties agree to the terms and conditions outlined in this rate confirmation. The carrier agrees to transport the freight as described above in compliance with all applicable regulations.',
-      { align: 'left' }
-    );
-
-  sectionSpacing();
-  sectionSpacing();
-
-  /* ================= SIGNATURE SECTION ================= */
-
-  doc.fontSize(12).fillColor(primary).font('Helvetica-Bold').text('SIGNATURES');
-  doc.moveDown(1);
-
-  const startY = doc.y;
-
-  // USER SIGNATURE
-  doc.fontSize(10).fillColor(grey).text('Customer Signature:', 40, startY);
-
-  if (userSignaturePath && fs.existsSync(userSignaturePath)) {
-    doc.image(userSignaturePath, 40, startY + 15, { width: 180 });
-  } else {
-    doc.moveTo(40, startY + 40).lineTo(220, startY + 40).stroke();
-  }
-
-  doc.fontSize(9).fillColor(grey)
-    .text('Signed By Customer', 40, startY + 60);
-
-  // DRIVER SIGNATURE
-  doc.fontSize(10).fillColor(grey).text('Carrier Signature:', 320, startY);
-
-  if (driverSignaturePath && fs.existsSync(driverSignaturePath)) {
-    doc.image(driverSignaturePath, 320, startY + 15, { width: 180 });
-  } else {
-    doc.moveTo(320, startY + 40).lineTo(500, startY + 40).stroke();
-  }
-
-  doc.fontSize(9).fillColor(grey)
-    .text('Signed By Carrier', 320, startY + 60);
+  section('Carrier Acknowledgment');
+  doc.fontSize(9).font('Helvetica').fillColor(primary).text(
+    'I acknowledge receipt of this Rate Confirmation and the load details, carrier rate, pickup and delivery information, and applicable instructions.'
+  );
+  doc.moveDown(0.3);
+  field('Acknowledged by', acknowledgment?.name);
+  field('Date / time', acknowledgment?.at ? new Date(acknowledgment.at).toLocaleString() : 'Awaiting carrier acknowledgment');
 
   doc.end();
 
@@ -641,6 +705,55 @@ const buildRateConfirmationPdf = async ({
   });
 
   return { filePath, fileUrl };
+};
+
+const approveRateConfirmation = async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    if (booking.rateConfirmation?.status !== 'awaiting_admin_approval') {
+      return res.status(409).json({ message: 'Rate confirmation is not awaiting admin approval' });
+    }
+    if (!booking.selectedQuote || !booking.driverId) {
+      return res.status(400).json({ message: 'An accepted carrier quote is required before issuing a rate confirmation' });
+    }
+
+    const user = await User.findById(booking.userId);
+    const adminProfile = await getAdminProfile();
+    const driver = await Driver.findById(booking.driverId).populate('userId', 'firstName lastName email phone companyProfile');
+    if (!driver?.userId) return res.status(400).json({ message: 'Assigned carrier account was not found' });
+
+    const generatedAt = new Date();
+    booking.rateConfirmation.generatedAt = generatedAt;
+    const { fileUrl: pdfUrl } = await buildRateConfirmationPdf({
+      booking,
+      user,
+      adminProfile,
+      driver,
+      selectedQuote: booking.selectedQuote,
+    });
+    booking.rateConfirmation.status = 'awaiting_carrier_acknowledgment';
+    booking.rateConfirmation.pdfUrl = pdfUrl;
+    booking.rateConfirmation.approvedAt = generatedAt;
+    booking.rateConfirmation.approvedBy = req.user._id;
+    await booking.save();
+
+    await createAndSendNotification({
+      userId: driver.userId._id,
+      title: `Rate Confirmation Ready - ${loadNumber(booking)}`,
+      body: 'Review the issued Rate Confirmation and acknowledge receipt to begin this load.',
+      data: { type: 'rate_confirmation_ready', bookingId: booking._id, loadNumber: loadNumber(booking) },
+    });
+
+    return res.json({
+      message: 'Rate confirmation approved and sent to the carrier',
+      status: booking.rateConfirmation.status,
+      pdfUrl,
+    });
+  } catch (err) {
+    console.error('[approveRateConfirmation] ERROR:', err);
+    return res.status(500).json({ message: 'Failed to approve rate confirmation', error: err.message });
+  }
 };
 
 // POST /api/bookings/:id/rate-confirmation/user-sign (user signs)
@@ -713,6 +826,14 @@ const userSignRateConfirmation = async (req, res) => {
       }
     });
 
+    await notifyAdmins({
+      title: `Rate Confirmation signed - ${loadNumber(booking)}`,
+      body: `${user?.firstName || 'Shipper'} signed the rate confirmation`,
+      type: 'rate_confirmation_signed',
+      data: { bookingId: booking._id, loadNumber: loadNumber(booking) },
+      io: req.app.get('io'),
+    });
+
     return res.json({
       message: "Signed successfully",
       status: booking.rateConfirmation.status,
@@ -728,58 +849,100 @@ const userSignRateConfirmation = async (req, res) => {
   }
 };
 
-// POST /api/bookings/:id/rate-confirmation/driver-accept (driver accepts)
-const driverAcceptRateConfirmation = async (req, res) => {
-  console.log("🔥 DRIVER ACCEPT ROUTE HIT");
+// POST /api/bookings/:id/rate-confirmation/acknowledge
+const driverAcknowledgeRateConfirmation = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { signatureUrl } = req.body;
-    console.log('[driverAcceptRateConfirmation] bookingId:', id);
-    const booking = await Booking.findById(id);
-    console.log('[driverAcceptRateConfirmation] booking:', booking);
-    if (booking && booking.rateConfirmation) {
-      console.log('[driverAcceptRateConfirmation] booking.rateConfirmation.status:', booking.rateConfirmation.status);
-    } else {
-      console.log('[driverAcceptRateConfirmation] booking or booking.rateConfirmation is missing');
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+    const assignedDriver = await Driver.findOne({ userId: req.user._id });
+    if (!assignedDriver || String(assignedDriver._id) !== String(booking.driverId)) {
+      return res.status(403).json({ message: 'Only the assigned carrier account can acknowledge this rate confirmation' });
     }
-    if (!booking) {
-      console.error('[driverAcceptRateConfirmation] Booking not found');
-      return res.status(404).json({ message: 'Booking not found' });
+    const previousStatus = booking.rateConfirmation?.status;
+    if (!['awaiting_carrier_acknowledgment', 'user_signed'].includes(previousStatus)) {
+      return res.status(409).json({ message: 'Rate confirmation is not awaiting carrier acknowledgment' });
     }
-    // Continue with normal logic
-    if (booking.rateConfirmation.status !== 'user_signed') {
-      console.error('[driverAcceptRateConfirmation] User must sign first:', booking.rateConfirmation.status);
-      return res.status(400).json({ message: 'User must sign first' });
-    }
-    booking.rateConfirmation.status = 'driver_accepted';
-    booking.rateConfirmation.driverSignatureUrl = signatureUrl || null;
-    booking.rateConfirmation.driverAcceptedAt = new Date();
+
+    const acknowledgedAt = new Date();
+    const driverName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim();
+    booking.rateConfirmation.status = previousStatus === 'user_signed' ? 'driver_accepted' : 'carrier_acknowledged';
+    booking.rateConfirmation.acknowledgedBy = req.user._id;
+    booking.rateConfirmation.acknowledgedByName = driverName || undefined;
+    booking.rateConfirmation.acknowledgedAt = acknowledgedAt;
+    booking.rateConfirmation.driverAcceptedAt = acknowledgedAt;
+    booking.rateConfirmation.acknowledgmentAudit = {
+      ip: req.ip,
+      userAgent: req.get('user-agent'),
+      device: req.get('x-device-info'),
+    };
+
+    const user = await User.findById(booking.userId);
+    const adminProfile = await getAdminProfile();
+    const driver = await Driver.findById(booking.driverId).populate('userId', 'firstName lastName email phone companyProfile');
+    const { fileUrl: pdfUrl } = await buildRateConfirmationPdf({
+      booking,
+      user,
+      adminProfile,
+      driver,
+      selectedQuote: booking.selectedQuote,
+      acknowledgment: { name: driverName, at: acknowledgedAt },
+    });
+    booking.rateConfirmation.pdfUrl = pdfUrl;
     booking.status = 'ACCEPTED';
     await booking.save();
-    // Update Trip status to 'accepted'
+
+    // The quote is already agreed; acknowledgment is the only carrier action required.
     await createAndSendNotification({
       userId: booking.userId,
-      title: "Driver Accepted Rate",
-      body: "Driver accepted the rate confirmation. Trip is ready.",
+      title: 'Rate Confirmation Acknowledged',
+      body: 'The assigned carrier acknowledged the agreed rate and load details.',
       data: {
-        type: "rate_accepted",
+        type: 'rate_confirmation_acknowledged',
         bookingId: booking._id
       }
     });
     const Trip = require('../models/Trip');
     const trip = await Trip.findOne({ bookingId: booking._id, driverId: booking.driverId });
     if (trip) {
+      trip.$locals.statusActor = { role: 'Driver', name: driverName || undefined };
       trip.status = 'accepted';
       await trip.save();
-      console.log('[driverAcceptRateConfirmation] Trip status updated to accepted:', trip._id);
-    } else {
-      console.error('[driverAcceptRateConfirmation] No Trip found for booking/driver when accepting rate confirmation');
     }
-    console.log('[driverAcceptRateConfirmation] Booking accepted and saved');
-    return res.json({ message: 'Driver accepted, booking ready for pickup', status: 'ACCEPTED' });
+    return res.json({ message: 'Rate confirmation acknowledged; load is ready to execute', status: booking.rateConfirmation.status, pdfUrl });
   } catch (err) {
-    console.error('[driverAcceptRateConfirmation] ERROR:', err);
-    return res.status(500).json({ message: 'Failed to accept', error: err.message });
+    console.error('[driverAcknowledgeRateConfirmation] ERROR:', err);
+    return res.status(500).json({ message: 'Failed to acknowledge rate confirmation', error: err.message });
+  }
+};
+
+const driverAcceptRateConfirmation = driverAcknowledgeRateConfirmation;
+
+const addBookingDocument = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Choose a PDF or image to upload' });
+    const docType = req.body.docType || 'other';
+    if (!['bol', 'rate_confirmation', 'other'].includes(docType)) {
+      return res.status(400).json({ message: 'Invalid document type' });
+    }
+
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) return res.status(404).json({ message: 'Booking not found' });
+
+    booking.documents.push({
+      docType,
+      fileUrl: `/uploads/booking-docs/${req.file.filename}`,
+      fileName: req.file.originalname,
+      uploadedAt: new Date(),
+    });
+    await booking.save();
+
+    return res.status(201).json({
+      message: 'Document attached to load',
+      document: booking.documents[booking.documents.length - 1].toObject(),
+    });
+  } catch (err) {
+    console.error('[addBookingDocument] ERROR:', err);
+    return res.status(500).json({ message: 'Failed to attach document to load', error: err.message });
   }
 };
 
@@ -915,11 +1078,16 @@ module.exports = {
   createBooking,
   submitQuote,
   selectQuote,
+  approveRateConfirmation,
   userSignRateConfirmation,
   driverAcceptRateConfirmation,
+  driverAcknowledgeRateConfirmation,
+  addBookingDocument,
   getBookingById,
   getAvailableBookings,
   debugBooking,
   getDriverConfirmations,
-  getBookingRaw
+  getBookingRaw,
+  approveBooking,
+  rejectBooking,
 };

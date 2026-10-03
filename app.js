@@ -19,6 +19,7 @@ const settlementRoutes = require('./routes/settlement.routes');
 const ratingRoutes = require('./routes/rating.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const issueRoutes = require('./routes/issue.routes');
+const messageRoutes = require('./routes/message.routes');
 const app = express();
 
 const defaultAllowedOrigins = [
@@ -152,7 +153,11 @@ app.post(
 
 app.use(express.json());
 
-app.use(morgan('dev'));
+app.use(morgan('dev', {
+  skip: (req, res) => req.method === 'POST'
+    && /^\/api\/trips\/[^/]+\/location$/.test(req.originalUrl)
+    && res.statusCode < 400,
+}));
 
 // Serve static files BEFORE routes for better performance
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -170,6 +175,7 @@ app.use('/api/settlements', settlementRoutes);
 app.use('/api/trips', tripRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/issues', issueRoutes);
+app.use('/api/messages', messageRoutes);
 
 
 

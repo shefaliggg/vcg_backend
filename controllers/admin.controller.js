@@ -411,7 +411,7 @@ const createDriverByAdmin = async (req, res) => {
         subject: 'Verify your driver account email',
         html: `
           <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-            <h2>Welcome to VCG Transport</h2>
+            <h2>Welcome to CP Transport</h2>
             <p>Hello ${firstName},</p>
             <p>Your driver account has been created by admin. Please verify your email address to continue.</p>
             <p>
@@ -481,12 +481,12 @@ const inviteDriver = async (req, res) => {
     try {
       await sendMail({
         to: normalizedEmail,
-        subject: "You're invited to drive with VCG Transport",
+        subject: "You're invited to drive with CP Transport",
         html: `
           <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-            <h2>Welcome to VCG Transport</h2>
+            <h2>Welcome to CP Transport</h2>
             <p>Hello ${firstName},</p>
-            <p>You've been invited to join VCG Transport as a driver. Open the CP Driver app and sign in with this email address to verify your account:</p>
+            <p>You've been invited to join CP Transport as a driver. Open the CP Driver app and sign in with this email address to verify your account:</p>
             <p style="font-weight:600;">${normalizedEmail}</p>
             <p>Once verified, you'll complete your driver profile and submit it for review.</p>
           </div>
@@ -561,7 +561,7 @@ const createShipperByAdmin = async (req, res) => {
         subject: 'Verify your shipper account email',
         html: `
           <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-            <h2>Welcome to VCG Transport</h2>
+            <h2>Welcome to CP Transport</h2>
             <p>Hello ${firstName},</p>
             <p>Your shipper account has been created by admin. Please verify your email address to continue.</p>
             <p>
@@ -626,12 +626,12 @@ const inviteShipper = async (req, res) => {
     try {
       await sendMail({
         to: normalizedEmail,
-        subject: "You're invited to VCG Transport",
+        subject: "You're invited to CP Transport",
         html: `
           <div style="font-family: Arial, sans-serif; line-height: 1.5;">
-            <h2>Welcome to VCG Transport</h2>
+            <h2>Welcome to CP Transport</h2>
             <p>Hello ${firstName},</p>
-            <p>You've been invited to join VCG Transport as a shipper. Open the CP Shipper app and sign in with this email address to verify your account:</p>
+            <p>You've been invited to join CP Transport as a shipper. Open the CP Shipper app and sign in with this email address to verify your account:</p>
             <p style="font-weight:600;">${normalizedEmail}</p>
             <p>Once verified, you'll complete your profile.</p>
           </div>

@@ -12,7 +12,7 @@ const transporter = nodemailer.createTransport({
 
 const sendMail = ({ from, to, subject, html }) =>
   transporter.sendMail({
-    from: from || `"VCG Transport" <${process.env.SMTP_FROM}>`,
+    from: from || `"CP Transport" <${process.env.SMTP_FROM}>`,
     to,
     subject,
     html,

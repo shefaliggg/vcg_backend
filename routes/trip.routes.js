@@ -15,11 +15,12 @@ const {
   updateDriverLocation,
   getDriverTrips,
   uploadPOD,
-  getPendingPODs, 
+  getPendingPODs,
   approvePOD,
   rejectPOD,
   getPendingPodTrip
 } = require('../controllers/trip.controller');
+const { getMessages, sendMessage } = require('../controllers/message.controller');
 
 
 
@@ -72,6 +73,10 @@ router.post('/:tripId/location', requireAuth, requireRole('driver'), updateDrive
 // Tracking routes (user and admin)
 router.get('/:tripId/track', requireAuth, getTrackingInfo);
 router.get('/booking/:bookingId', requireAuth, getTripByBooking);
+
+// Chat between the driver and the shipper on a trip (also readable by admin)
+router.get('/:tripId/messages', requireAuth, getMessages);
+router.post('/:tripId/messages', requireAuth, sendMessage);
 
 // Admin routes
 router.get('/', requireAuth, requireRole('admin'), getAllTrips);

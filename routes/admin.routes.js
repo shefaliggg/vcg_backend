@@ -28,9 +28,10 @@ const {
   createTruckByAdmin
 } = require('../controllers/admin.controller');
 
+const { getAllBookings, approveBooking, rejectBooking } = require('../controllers/booking.controller');
+
 // Get all users with role=user (shippers)
 router.get('/users', requireAuth, requireRole('admin'), getAllShippers);
-const { getAllBookings } = require('../controllers/booking.controller');
 const { getDashboardOverview, assignDriverToBooking: assignDriver } = require('../controllers/dashboard.controller');
 const { getAllLoads, getLoadById } = require('../controllers/loads.controller');
 router.get('/dashboard/overview', requireAuth, requireRole('admin'), getDashboardOverview);
@@ -63,6 +64,7 @@ router.put('/shippers/:id/reject', requireAuth, requireRole('admin'), rejectShip
 
 // Get all bookings (admin only)
 router.get('/bookings', requireAuth, requireRole('admin'), getAllBookings);
-
+router.put('/bookings/:id/approve', requireAuth, requireRole('admin'), approveBooking);
+router.put('/bookings/:id/reject', requireAuth, requireRole('admin'), rejectBooking);
 
 module.exports = router;

@@ -1,6 +1,6 @@
 // Get all trips for driver (history, active, etc)
 
-const { createAndSendNotification } = require('../utils/notificationService');
+const { createAndSendNotification, notifyAdmins } = require('../utils/notificationService');
 const getDriverTrips = async (req, res) => {
   try {
     console.log('[getDriverTrips] req.user:', req.user);
@@ -22,6 +22,7 @@ const getDriverTrips = async (req, res) => {
     const formattedTrips = trips.map(trip => ({
       tripId: trip._id,
       bookingId: trip.bookingId?._id,
+      loadNumber: trip.bookingId?.loadNumber || trip.bookingId?.referenceNumber || `#${String(trip.bookingId?._id || '').slice(-6).toUpperCase()}`,
       pickup: trip.bookingId?.pickupLocation?.address || 'N/A',
       drop: trip.bookingId?.deliveryLocation?.address || 'N/A',
       pickupDate: trip.bookingId?.pickupDate,
@@ -51,6 +52,78 @@ const getDriverTrips = async (req, res) => {
 };
 const Trip = require('../models/Trip');
 const Booking = require('../models/Booking');
+const formatLoadNumber = (booking) => booking?.loadNumber
+  || booking?.referenceNumber
+  || `#${String(booking?._id || '').slice(-6).toUpperCase()}`;
+
+// Merges Trip.statusHistory (granular pickup/delivery lifecycle) with
+// Booking.statusHistory (posting/bidding/confirmation events) into one
+// chronological feed for the Load Details "Activity" section on both apps.
+const buildActivityFeed = (trip, booking) => {
+  const tripEvents = (trip?.statusHistory || []).map((e) => ({
+    status: e.status,
+    changedAt: e.changedAt,
+    actorRole: e.actorRole,
+    actorName: e.actorName,
+    note: e.note,
+    source: 'trip',
+  }));
+  const bookingEvents = (booking?.statusHistory || []).map((e) => ({
+    status: e.status,
+    changedAt: e.changedAt,
+    actorRole: e.actorRole,
+    actorName: e.actorName,
+    note: e.note,
+    source: 'booking',
+  }));
+  const rateConfirmationEvents = [];
+  if (booking?.rateConfirmation?.pdfUrl && booking.rateConfirmation.generatedAt) {
+    rateConfirmationEvents.push({
+      status: 'rate_confirmation_issued',
+      changedAt: booking.rateConfirmation.generatedAt,
+      actorRole: 'VCG',
+      actorName: 'VCG Transport',
+      source: 'rate_confirmation',
+    });
+  }
+  const acknowledgedAt = booking?.rateConfirmation?.acknowledgedAt || booking?.rateConfirmation?.driverAcceptedAt;
+  if (acknowledgedAt) {
+    const driverName = `${trip?.driverId?.userId?.firstName || ''} ${trip?.driverId?.userId?.lastName || ''}`.trim();
+    rateConfirmationEvents.push({
+      status: 'carrier_acknowledged',
+      changedAt: acknowledgedAt,
+      actorRole: 'Carrier',
+      actorName: booking.rateConfirmation.acknowledgedByName || driverName || undefined,
+      source: 'rate_confirmation',
+    });
+  }
+  return [...tripEvents, ...bookingEvents, ...rateConfirmationEvents].sort(
+    (a, b) => new Date(b.changedAt) - new Date(a.changedAt)
+  );
+};
+
+// Shared shape for the Load Details "Documents" section: BOL/rate confirmation
+// from Booking.documents + the rate confirmation PDF, and the POD from the trip.
+const buildDocuments = (trip, booking) => {
+  const docs = (booking?.documents || []).map((d) => ({
+    docType: d.docType,
+    fileUrl: d.fileUrl,
+    fileName: d.fileName,
+    uploadedAt: d.uploadedAt,
+  }));
+  if (booking?.rateConfirmation?.pdfUrl && !docs.some((d) => d.docType === 'rate_confirmation')) {
+    docs.push({
+      docType: 'rate_confirmation',
+      fileUrl: booking.rateConfirmation.pdfUrl,
+      fileName: 'Rate Confirmation',
+      uploadedAt: booking.rateConfirmation.generatedAt,
+    });
+  }
+  if (trip?.podUrl) {
+    docs.push({ docType: 'pod', fileUrl: trip.podUrl, fileName: 'Proof of Delivery', uploadedAt: trip.updatedAt });
+  }
+  return docs;
+};
 
 // Get assigned trips for driver
 const getAssignedTrips = async (req, res) => {
@@ -78,6 +151,7 @@ const getAssignedTrips = async (req, res) => {
     const formattedTrips = trips.map(trip => ({
       tripId: trip._id,
       bookingId: trip.bookingId._id,
+      loadNumber: formatLoadNumber(trip.bookingId),
       pickup: trip.bookingId.pickupLocation?.address || 'N/A',
       drop: trip.bookingId.deliveryLocation?.address || 'N/A',
       pickupDate: trip.bookingId.pickupDate,
@@ -120,10 +194,14 @@ const acceptTrip = async (req, res) => {
     }
     console.log('[acceptTrip] bookingId:', trip.bookingId?._id);
     console.log('[acceptTrip] booking.rateConfirmation:', trip.bookingId?.rateConfirmation);
-    if (!trip.bookingId || trip.bookingId.rateConfirmation?.status !== 'driver_accepted') {
+    if (!trip.bookingId || !['carrier_acknowledged', 'driver_accepted'].includes(trip.bookingId.rateConfirmation?.status)) {
       console.error('[acceptTrip] Rate confirmation not accepted:', trip.bookingId?.rateConfirmation?.status);
-      return res.status(400).json({ message: 'Rate confirmation must be accepted by user and driver before starting trip' });
+      return res.status(400).json({ message: 'Carrier must acknowledge the rate confirmation before starting the trip' });
     }
+    trip.$locals.statusActor = {
+      role: 'Driver',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
     trip.status = 'accepted';
     await trip.save();
     // Update booking status
@@ -155,6 +233,10 @@ const rejectTrip = async (req, res) => {
       return res.status(400).json({ message: 'Trip is not in assigned state' });
     }
 
+    trip.$locals.statusActor = {
+      role: 'Driver',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
     trip.status = 'rejected';
     await trip.save();
 
@@ -199,11 +281,15 @@ const updateTripStatus = async (req, res) => {
     const booking = trip.bookingId;
     console.log('[updateTripStatus] Trip:', { tripId: trip._id, tripStatus: trip.status });
     console.log('[updateTripStatus] Booking:', { bookingId: booking?._id, rateConfirmation: booking?.rateConfirmation });
-    if (!booking || booking.rateConfirmation?.status !== 'driver_accepted') {
+    if (!booking || !['carrier_acknowledged', 'driver_accepted'].includes(booking.rateConfirmation?.status)) {
       console.error('[updateTripStatus] Rate confirmation not accepted', { bookingId: booking?._id, rateConfirmation: booking?.rateConfirmation });
-      return res.status(400).json({ message: 'Rate confirmation must be accepted by user and driver before updating trip status' });
+      return res.status(400).json({ message: 'Carrier must acknowledge the rate confirmation before updating trip status' });
     }
 
+    trip.$locals.statusActor = {
+      role: 'Driver',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
     trip.status = status;
 
     if (status === 'in_transit' && !trip.startedAt) {
@@ -310,6 +396,12 @@ const getTrackingInfo = async (req, res) => {
       startedAt: trip.startedAt,
       completedAt: trip.completedAt,
       lastUpdatedAt: trip.updatedAt,
+      podUrl: trip.podUrl || null,
+      platformFee: trip.platformFee || 0,
+      driverPayout: trip.driverPayout || 0,
+      planPercentageUsed: trip.planPercentageUsed || 0,
+      documents: buildDocuments(trip, trip.bookingId),
+      activity: buildActivityFeed(trip, trip.bookingId),
       driver: trip.driverId?.userId ? {
         name: `${trip.driverId.userId.firstName} ${trip.driverId.userId.lastName}`,
         phone: trip.driverId.userId.phone,
@@ -319,16 +411,21 @@ const getTrackingInfo = async (req, res) => {
       eta,
       booking: {
         bookingId: trip.bookingId?._id,
+        loadNumber: formatLoadNumber(trip.bookingId),
         pickup: trip.bookingId?.pickupLocation?.address,
         pickupLocation: trip.bookingId?.pickupLocation || null,
         drop: trip.bookingId?.deliveryLocation?.address,
         dropLocation: trip.bookingId?.deliveryLocation || null,
         pickupDate: trip.bookingId?.pickupDate,
         deliveryDate: trip.bookingId?.deliveryDate,
+        pickupDetails: trip.bookingId?.pickupDetails || null,
+        deliveryDetails: trip.bookingId?.deliveryDetails || null,
         shipper: trip.bookingId?.shipper || null,
         consignee: trip.bookingId?.consignee || null,
         truckType: trip.bookingId?.truckType,
         loadDetails: trip.bookingId?.loadDetails || null,
+        requirements: trip.bookingId?.requirements || null,
+        equipmentDetails: trip.bookingId?.equipmentDetails || null,
         rateConfirmation: trip.bookingId?.rateConfirmation || null,
       }
     };
@@ -366,6 +463,12 @@ const getTripByBooking = async (req, res) => {
       startedAt: trip.startedAt,
       completedAt: trip.completedAt,
       lastUpdatedAt: trip.updatedAt,
+      podUrl: trip.podUrl || null,
+      platformFee: trip.platformFee || 0,
+      driverPayout: trip.driverPayout || 0,
+      planPercentageUsed: trip.planPercentageUsed || 0,
+      documents: buildDocuments(trip, trip.bookingId),
+      activity: buildActivityFeed(trip, trip.bookingId),
       driver: trip.driverId?.userId ? {
         name: `${trip.driverId.userId.firstName} ${trip.driverId.userId.lastName}`,
         phone: trip.driverId.userId.phone,
@@ -373,16 +476,21 @@ const getTripByBooking = async (req, res) => {
       } : null,
       booking: {
         bookingId: trip.bookingId?._id,
+        loadNumber: formatLoadNumber(trip.bookingId),
         pickup: trip.bookingId?.pickupLocation?.address,
         pickupLocation: trip.bookingId?.pickupLocation || null,
         drop: trip.bookingId?.deliveryLocation?.address,
         dropLocation: trip.bookingId?.deliveryLocation || null,
         pickupDate: trip.bookingId?.pickupDate,
         deliveryDate: trip.bookingId?.deliveryDate,
+        pickupDetails: trip.bookingId?.pickupDetails || null,
+        deliveryDetails: trip.bookingId?.deliveryDetails || null,
         shipper: trip.bookingId?.shipper || null,
         consignee: trip.bookingId?.consignee || null,
         truckType: trip.bookingId?.truckType,
         loadDetails: trip.bookingId?.loadDetails || null,
+        requirements: trip.bookingId?.requirements || null,
+        equipmentDetails: trip.bookingId?.equipmentDetails || null,
         rateConfirmation: trip.bookingId?.rateConfirmation || null,
       }
     };
@@ -450,7 +558,9 @@ const updateDriverLocation = async (req, res) => {
       });
 
     }
-    console.log('Driver location updated and emitted via Socket.IO:', { tripId, lat, lng, address });
+    if (process.env.DEBUG_LOCATION === 'true') {
+      console.log('Driver location updated and emitted via Socket.IO:', { tripId, lat, lng, address });
+    }
 
     return res.json({ message: 'Location updated' });
 
@@ -465,15 +575,34 @@ const updateDriverLocation = async (req, res) => {
 const uploadPOD = async (req, res) => {
   try {
     const { tripId } = req.params;
-
-    const trip = await Trip.findById(tripId);
-    if (!trip) {
-      return res.status(404).json({ message: 'Trip not found' });
+    if (!req.file) {
+      return res.status(400).json({ message: 'No POD file uploaded' });
+    }
+    if (!req.driver?._id) {
+      return res.status(400).json({ message: 'Driver profile not found' });
     }
 
+    const trip = await Trip.findOne({ _id: tripId, driverId: req.driver._id });
+    if (!trip) {
+      return res.status(404).json({ message: 'Trip not found for this driver' });
+    }
+
+    trip.$locals.statusActor = {
+      role: 'Driver',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
     trip.podUrl = `/uploads/pod/${req.file.filename}`;
     trip.status = 'pod_uploaded';
     await trip.save();
+
+    const driverName = `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || 'A driver';
+    await notifyAdmins({
+      title: 'POD awaiting review',
+      body: `${driverName} uploaded a proof of delivery for review`,
+      type: 'pod_pending_review',
+      data: { tripId: trip._id },
+      io: req.app.get('io'),
+    });
 
     return res.json({ message: 'POD uploaded successfully' });
   } catch (err) {
@@ -483,12 +612,15 @@ const uploadPOD = async (req, res) => {
 
 const getPendingPodTrip = async (req, res) => {
   try {
-    const driverId = req.user.driverId;
+    const driverId = req.driver?._id;
+    if (!driverId) {
+      return res.status(400).json({ message: 'Driver profile not found' });
+    }
 
     const trip = await Trip.findOne({
-      driver: driverId,
+      driverId,
       status: 'delivered',
-      podImage: { $exists: false }
+      podUrl: null,
     }).sort({ updatedAt: -1 });
 
     if (!trip) {
@@ -546,7 +678,7 @@ const getPendingPODs = async (req, res) => {
       toLocation: trip.bookingId?.deliveryLocation?.address,
       uploadDate: trip.updatedAt,
       status: 'pod_uploaded',
-      images: [`http://54.174.219.57:5000${trip.podUrl}`]
+      images: [trip.podUrl]
     }));
 
     return res.json(formatted);
@@ -589,6 +721,10 @@ const approvePOD = async (req, res) => {
 
 
 
+    trip.$locals.statusActor = {
+      role: 'Admin',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
     trip.status = 'pod_approved';
     await trip.save();
 
@@ -627,6 +763,11 @@ const rejectPOD = async (req, res) => {
     const trip = await Trip.findById(tripId);
     if (!trip) return res.status(404).json({ message: 'Trip not found' });
 
+    trip.$locals.statusActor = {
+      role: 'Admin',
+      name: `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() || undefined,
+    };
+    trip.$locals.statusNote = reason;
     trip.status = 'pod_rejected';
     trip.podRejectionReason = reason;
     await trip.save();
