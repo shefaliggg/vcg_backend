@@ -73,5 +73,5 @@ uploads/
 # Ignore local scripts output
 /scripts/*.log
 
-# Ignore sensitive config
-config/jwt.js
+# # Ignore sensitive config
+# config/jwt.js
