@@ -1,0 +1,102 @@
+name: Deploy backend to EC2
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: false
+
+env:
+  APP_DIR: vcg_backend # relative to the EC2 user's home directory
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node (syntax check)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps & sanity check
+        run: |
+          npm ci --omit=dev
+          node --check server.js
+          node --check app.js
+
+      - name: Configure SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Sync code to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" "mkdir -p ~/$APP_DIR/uploads"
+          # --delete removes stale files, but excluded paths (uploads, node_modules, .env) are left untouched
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/ec2.pem" \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'node_modules/' \
+            --exclude 'uploads/' \
+            --exclude '.env' \
+            ./ "$EC2_USER@$EC2_HOST:~/$APP_DIR/"
+
+      - name: Write .env from secret
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          if [ -z "$ENV_FILE" ]; then echo "ENV_FILE secret is empty"; exit 1; fi
+          printf '%s\n' "$ENV_FILE" | ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" \
+            "umask 077 && cat > ~/$APP_DIR/.env"
+
+      - name: Install & restart on EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" bash -s -- "$APP_DIR" <<'EOF'
+            set -euo pipefail
+            # load nvm if node was installed through it
+            export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            cd ~/"$1"
+            npm ci --omit=dev
+            pm2 startOrReload ecosystem.config.js --update-env
+            pm2 save
+          EOF
+
+      - name: Health check
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" '
+            export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            PORT=$(grep -E "^PORT=" ~/'"$APP_DIR"'/.env | cut -d= -f2 | tr -d "\r\"" ); PORT=${PORT:-5000}
+            for i in $(seq 1 15); do
+              if curl -fsS "http://localhost:$PORT/health"; then echo; echo "Healthy on port $PORT"; exit 0; fi
+              sleep 2
+            done
+            echo "Health check failed"; pm2 logs vcg-backend --lines 50 --nostream; exit 1
+          '
+
+      - name: Cleanup key
+        if: always()
+        run: rm -f ~/.ssh/ec2.pem
