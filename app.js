@@ -35,6 +35,7 @@ const defaultAllowedOrigins = [
   'http://127.0.0.1:8082',
   'http://54.174.219.57:5000',
   'http://54.174.219.57',
+  'http://vcg-transport.s3-website-us-east-1.amazonaws.com',
 ];
 
 const envAllowedOrigins = (process.env.CORS_ORIGINS || '')
