@@ -35,44 +35,56 @@ jobs:
         env:
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2.pem
-          chmod 600 ~/.ssh/ec2.pem
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
-
-      - name: Sync code to EC2
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
         run: |
-          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" "mkdir -p ~/$APP_DIR/uploads"
+          # strip whitespace/newlines that often sneak in when pasting secrets
+          EC2_HOST=$(printf '%s' "$EC2_HOST" | tr -d '[:space:]')
+          EC2_USER=$(printf '%s' "$EC2_USER" | tr -d '[:space:]')
+          missing=0
+          [ -n "$EC2_HOST" ]    || { echo "::error::Secret EC2_HOST is empty or not set"; missing=1; }
+          [ -n "$EC2_USER" ]    || { echo "::error::Secret EC2_USER is empty or not set"; missing=1; }
+          [ -n "$EC2_SSH_KEY" ] || { echo "::error::Secret EC2_SSH_KEY is empty or not set"; missing=1; }
+          [ "$missing" = 0 ] || exit 1
+
+          mkdir -p ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" | tr -d '\r' > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keygen -y -f ~/.ssh/ec2.pem > /dev/null \
+            || { echo "::error::EC2_SSH_KEY is not a valid private key (paste the whole .pem incl. BEGIN/END lines)"; exit 1; }
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+          cat > ~/.ssh/config <<EOF
+          Host ec2
+            HostName $EC2_HOST
+            User $EC2_USER
+            IdentityFile ~/.ssh/ec2.pem
+            IdentitiesOnly yes
+            ServerAliveInterval 30
+          EOF
+          ssh ec2 'echo "SSH OK: $(whoami)@$(hostname)"'
+
+      - name: Sync code to EC2
+        run: |
+          ssh ec2 "mkdir -p ~/$APP_DIR/uploads"
           # --delete removes stale files, but excluded paths (uploads, node_modules, .env) are left untouched
           rsync -az --delete \
-            -e "ssh -i ~/.ssh/ec2.pem" \
             --exclude '.git/' \
             --exclude '.github/' \
             --exclude 'node_modules/' \
             --exclude 'uploads/' \
             --exclude '.env' \
-            ./ "$EC2_USER@$EC2_HOST:~/$APP_DIR/"
+            ./ "ec2:~/$APP_DIR/"
 
       - name: Write .env from secret
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
           ENV_FILE: ${{ secrets.ENV_FILE }}
         run: |
-          if [ -z "$ENV_FILE" ]; then echo "ENV_FILE secret is empty"; exit 1; fi
-          printf '%s\n' "$ENV_FILE" | ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" \
-            "umask 077 && cat > ~/$APP_DIR/.env"
+          if [ -z "$ENV_FILE" ]; then echo "::error::Secret ENV_FILE is empty or not set"; exit 1; fi
+          printf '%s\n' "$ENV_FILE" | tr -d '\r' | ssh ec2 "umask 077 && cat > ~/$APP_DIR/.env"
 
       - name: Install & restart on EC2
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
         run: |
-          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" bash -s -- "$APP_DIR" <<'EOF'
+          ssh ec2 bash -s -- "$APP_DIR" <<'EOF'
             set -euo pipefail
             # load nvm if node was installed through it
             export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
@@ -83,11 +95,8 @@ jobs:
           EOF
 
       - name: Health check
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
         run: |
-          ssh -i ~/.ssh/ec2.pem "$EC2_USER@$EC2_HOST" '
+          ssh ec2 '
             export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
             PORT=$(grep -E "^PORT=" ~/'"$APP_DIR"'/.env | cut -d= -f2 | tr -d "\r\"" ); PORT=${PORT:-5000}
             for i in $(seq 1 15); do
@@ -99,4 +108,4 @@ jobs:
 
       - name: Cleanup key
         if: always()
-        run: rm -f ~/.ssh/ec2.pem
+        run: rm -f ~/.ssh/ec2.pem ~/.ssh/config
